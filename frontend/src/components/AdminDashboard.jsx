@@ -567,73 +567,52 @@ function AdminDashboard() {
   // SEARCH + FILTER
   // ==============================
   const filteredReports = useMemo(() => {
-    const query =
-      search.trim().toLowerCase();
+    const query = search.trim().toLowerCase();
 
-    return reports.filter(
-      (report) => {
-        const status =
-          getStatus(
-            report.analysis
-          );
+    return reports.filter((report) => {
+      const status = getStatus(report.analysis);
 
-        const priority =
-          String(
-            report.priority || ""
-          ).toLowerCase();
+      // Normalize priority so values such as "High", "HIGH",
+      // or "High Priority" are handled consistently.
+      const priority = getPriorityClass(report.priority);
 
-        const matchesSearch =
-          !query ||
-          String(report.id)
-            .includes(query) ||
-          String(
-            report.user_id || ""
-          )
-            .toLowerCase()
-            .includes(query) ||
-          String(
-            report.location || ""
-          )
-            .toLowerCase()
-            .includes(query) ||
-          String(
-            report.damage_type || ""
-          )
-            .toLowerCase()
-            .includes(query) ||
-          String(
-            report.severity || ""
-          )
-            .toLowerCase()
-            .includes(query) ||
-          String(
-            report.priority || ""
-          )
-            .toLowerCase()
-            .includes(query) ||
-          String(
-            report.analysis || ""
-          )
-            .toLowerCase()
-            .includes(query);
+      const searchableText = [
+        report.id,
+        report.user_id,
+        report.location,
+        report.damage_type,
+        report.severity,
+        report.priority,
+        report.priority_score,
+        report.created_at,
+        formatDate(report.created_at),
+        report.analysis,
+      ]
+        .filter(
+          (value) =>
+            value !== null &&
+            value !== undefined
+        )
+        .join(" ")
+        .toLowerCase();
 
-        const matchesStatus =
-          statusFilter === "all" ||
-          status.className ===
-            statusFilter;
+      const matchesSearch =
+        !query || searchableText.includes(query);
 
-        const matchesPriority =
-          priorityFilter === "all" ||
-          priority ===
-            priorityFilter;
+      const matchesStatus =
+        statusFilter === "all" ||
+        status.className === statusFilter;
 
-        return (
-          matchesSearch &&
-          matchesStatus &&
-          matchesPriority
-        );
-      }
-    );
+      const matchesPriority =
+        priorityFilter === "all" ||
+        priority === priorityFilter;
+
+      return (
+        matchesSearch &&
+        matchesStatus &&
+        matchesPriority
+      );
+    });
   }, [
     reports,
     search,
