@@ -567,52 +567,128 @@ function AdminDashboard() {
   // SEARCH + FILTER
   // ==============================
   const filteredReports = useMemo(() => {
-    const query = search.trim().toLowerCase();
+    // Search is AND-based:
+    // "high pothole" means the same report must contain
+    // BOTH "high" and "pothole".
+    const searchTerms = search
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
 
-    return reports.filter((report) => {
-      const status = getStatus(report.analysis);
+    return reports.filter(
+      (report) => {
+        const status =
+          getStatus(
+            report.analysis
+          );
 
-      // Normalize priority so values such as "High", "HIGH",
-      // or "High Priority" are handled consistently.
-      const priority = getPriorityClass(report.priority);
+        const priority =
+          String(
+            report.priority || ""
+          )
+            .trim()
+            .toLowerCase();
 
-      const searchableText = [
-        report.id,
-        report.user_id,
-        report.location,
-        report.damage_type,
-        report.severity,
-        report.priority,
-        report.priority_score,
-        report.created_at,
-        formatDate(report.created_at),
-        report.analysis,
-      ]
-        .filter(
-          (value) =>
-            value !== null &&
-            value !== undefined
-        )
-        .join(" ")
-        .toLowerCase();
+        // Structured fields are kept separate so that a search
+        // such as "crack" matches the Damage Type "Crack"
+        // instead of accidentally matching the Gemini analysis
+        // of a Pothole report.
+        const damageType =
+          String(report.damage_type ?? "")
+            .trim()
+            .toLowerCase();
 
-      const matchesSearch =
-        !query || searchableText.includes(query);
+        const severity =
+          String(report.severity ?? "")
+            .trim()
+            .toLowerCase();
 
-      const matchesStatus =
-        statusFilter === "all" ||
-        status.className === statusFilter;
+        const priorityValue =
+          String(report.priority ?? "")
+            .trim()
+            .toLowerCase();
 
-      const matchesPriority =
-        priorityFilter === "all" ||
-        priority === priorityFilter;
+        const searchableText = [
+          report.id,
+          report.user_id,
+          report.location,
+          report.damage_type,
+          report.severity,
+          report.priority,
+          report.priority_score,
+          report.created_at,
+        ]
+          .map((value) =>
+            String(value ?? "").toLowerCase()
+          )
+          .join(" ");
 
-      return (
-        matchesSearch &&
-        matchesStatus &&
-        matchesPriority
-      );
-    });
+        const knownDamageTypes = [
+          "pothole",
+          "crack",
+          "surface deterioration",
+          "road edge damage",
+          "water-related damage",
+          "other",
+          "no visible road damage",
+        ];
+
+        const knownSeverities = [
+          "minor",
+          "moderate",
+          "severe",
+          "critical",
+          "not determinable",
+        ];
+
+        const knownPriorities = [
+          "low",
+          "medium",
+          "high",
+          "critical",
+          "not determinable",
+        ];
+
+        // Every search term must be present.
+        // For structured values such as "crack", "pothole",
+        // "high", and "severe", match the corresponding
+        // structured field only.
+        const matchesSearch =
+          searchTerms.length === 0 ||
+          searchTerms.every((term) => {
+            if (knownDamageTypes.includes(term)) {
+              return damageType === term;
+            }
+
+            if (knownSeverities.includes(term)) {
+              return severity === term;
+            }
+
+            if (knownPriorities.includes(term)) {
+              return priorityValue === term;
+            }
+
+            return searchableText.includes(term);
+          });
+
+        const matchesStatus =
+          statusFilter === "all" ||
+          status.className ===
+            statusFilter;
+
+        const matchesPriority =
+          priorityFilter === "all" ||
+          priority ===
+            priorityFilter;
+
+        return (
+          matchesSearch &&
+          matchesStatus &&
+          matchesPriority
+        );
+      }
+    );
   }, [
     reports,
     search,
@@ -859,7 +935,7 @@ function AdminDashboard() {
                 }
               >
                 <option value="all">
-                  All Priority
+                  All Priorities
                 </option>
 
                 <option value="critical">
@@ -876,6 +952,10 @@ function AdminDashboard() {
 
                 <option value="low">
                   Low
+                </option>
+
+                <option value="not determinable">
+                  Not Determinable
                 </option>
               </select>
 
