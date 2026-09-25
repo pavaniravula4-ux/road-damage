@@ -1,5 +1,6 @@
-from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime, timezone, timedelta
+
+from flask_sqlalchemy import SQLAlchemy
 
 
 db = SQLAlchemy()
@@ -15,6 +16,39 @@ INDIA_TIMEZONE = timezone(
 
 
 # ============================================================
+# USER MODEL
+# ============================================================
+
+class User(db.Model):
+
+    __tablename__ = "users"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    email = db.Column(
+        db.String(255),
+        unique=True,
+        nullable=False
+    )
+
+    password = db.Column(
+        db.String(255),
+        nullable=False
+    )
+
+    # Supported roles:
+    # user, operator, admin
+    role = db.Column(
+        db.String(50),
+        default="user",
+        nullable=False
+    )
+
+
+# ============================================================
 # REPORT MODEL
 # ============================================================
 
@@ -22,55 +56,33 @@ class Report(db.Model):
 
     __tablename__ = "report"
 
-    # --------------------------------------------------------
-    # Report ID
-    # --------------------------------------------------------
-
     id = db.Column(
         db.Integer,
         primary_key=True
     )
-
-    # --------------------------------------------------------
-    # User who submitted the report
-    # --------------------------------------------------------
 
     user_id = db.Column(
         db.Integer,
         nullable=False
     )
 
-    # --------------------------------------------------------
-    # Road location
-    # --------------------------------------------------------
-
     location = db.Column(
         db.String(255),
         nullable=False
     )
-
-    # --------------------------------------------------------
-    # Uploaded road image
-    # --------------------------------------------------------
 
     image_path = db.Column(
         db.String(255),
         nullable=False
     )
 
-    # --------------------------------------------------------
     # Complete Gemini response
-    # --------------------------------------------------------
-
     analysis = db.Column(
         db.Text,
         nullable=False
     )
 
-    # --------------------------------------------------------
     # Structured AI results
-    # --------------------------------------------------------
-
     damage_type = db.Column(
         db.String(100),
         nullable=True
@@ -86,20 +98,13 @@ class Report(db.Model):
         nullable=True
     )
 
-    # --------------------------------------------------------
     # Numerical maintenance priority score
-    # --------------------------------------------------------
-
     priority_score = db.Column(
         db.Integer,
         nullable=True
     )
 
-    # --------------------------------------------------------
-    # Report creation date and time
-    # Stored in IST
-    # --------------------------------------------------------
-
+    # Upload date and time in IST
     created_at = db.Column(
         db.DateTime,
         default=lambda: datetime.now(INDIA_TIMEZONE),

@@ -1,8 +1,9 @@
 import os
-import uuid
-import secrets
-import time
 import re
+import secrets
+import sqlite3
+import time
+import uuid
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask, request, jsonify, send_from_directory
@@ -17,7 +18,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 
 # ============================================================
-# LOAD ENVIRONMENT VARIABLES
+# LOAD ENVIRONMENT
 # ============================================================
 
 load_dotenv()
@@ -26,6 +27,7 @@ load_dotenv()
 # ============================================================
 # INDIA STANDARD TIME
 # ============================================================
+
 INDIA_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -41,11 +43,11 @@ CORS(
         r"/*": {
             "origins": [
                 "http://localhost:5173",
-                "http://127.0.0.1:5173"
+                "http://127.0.0.1:5173",
             ],
             "allow_headers": [
                 "Content-Type",
-                "Authorization"
+                "Authorization",
             ],
             "methods": [
                 "GET",
@@ -53,14 +55,26 @@ CORS(
                 "PUT",
                 "PATCH",
                 "DELETE",
-                "OPTIONS"
-            ]
+                "OPTIONS",
+            ],
         }
-    }
+    },
+    supports_credentials=True,
 )
 
+
 # ============================================================
-# DATABASE CONFIGURATION
+# DATABASE
+# ============================================================
+#
+# Flask-SQLAlchemy stores sqlite:///roadguard.db in Flask's
+# instance folder by default:
+#
+# backend/
+#   instance/
+#       roadguard.db
+#
+# This matches your existing database.
 # ============================================================
 
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///roadguard.db"
@@ -73,101 +87,164 @@ db = SQLAlchemy(app)
 # DATABASE MODELS
 # ============================================================
 
-class User(db.Model):
 
+class User(db.Model):
     __tablename__ = "users"
 
     id = db.Column(
         db.Integer,
-        primary_key=True
+        primary_key=True,
     )
 
-    # We keep the existing "email" column so your
-    # existing roadguard.db database does not immediately
-    # break.
-    #
-    # The frontend can use this field as a username.
+    # Existing column is kept as the username/email field.
     email = db.Column(
         db.String(255),
         unique=True,
-        nullable=False
+        nullable=False,
     )
 
     password = db.Column(
         db.String(255),
-        nullable=False
+        nullable=False,
     )
 
     role = db.Column(
         db.String(50),
         default="user",
-        nullable=False
+        nullable=False,
     )
 
 
 class Report(db.Model):
-
     __tablename__ = "report"
 
     id = db.Column(
         db.Integer,
-        primary_key=True
+        primary_key=True,
     )
 
     user_id = db.Column(
         db.Integer,
-        nullable=False
+        nullable=False,
     )
 
     location = db.Column(
         db.String(255),
-        nullable=False
+        nullable=False,
     )
 
     image_path = db.Column(
         db.String(255),
-        nullable=False
+        nullable=False,
     )
 
     analysis = db.Column(
         db.Text,
-        nullable=False
+        nullable=False,
     )
 
     damage_type = db.Column(
         db.String(100),
-        nullable=True
+        nullable=True,
     )
 
     severity = db.Column(
         db.String(50),
-        nullable=True
+        nullable=True,
     )
 
     priority = db.Column(
         db.String(50),
-        nullable=True
+        nullable=True,
     )
 
     priority_score = db.Column(
         db.Integer,
-        nullable=True
+        nullable=True,
+    )
+
+    # ========================================================
+    # OPERATOR ASSIGNMENT + TRACKING
+    # ========================================================
+
+    assigned_operator_id = db.Column(
+        db.Integer,
+        nullable=True,
+    )
+
+    status = db.Column(
+        db.String(50),
+        default="Unassigned",
+        nullable=False,
+    )
+
+    assigned_at = db.Column(
+        db.DateTime,
+        nullable=True,
+    )
+
+    completed_at = db.Column(
+        db.DateTime,
+        nullable=True,
     )
 
     created_at = db.Column(
         db.DateTime,
         default=lambda: datetime.now(INDIA_TIMEZONE),
-        nullable=True
+        nullable=True,
     )
 
 
 # ============================================================
-# CREATE DATABASE TABLES
+# CREATE TABLES + SAFE MIGRATION
 # ============================================================
 
 with app.app_context():
-
     db.create_all()
+
+    # db.create_all() does not add columns to an existing table.
+    # Add the four tracking columns if an older database is used.
+    inspector = db.inspect(db.engine)
+
+    if "report" in inspector.get_table_names():
+        existing_columns = {
+            column["name"]
+            for column in inspector.get_columns("report")
+        }
+
+        migration_statements = {
+            "assigned_operator_id": (
+                "ALTER TABLE report "
+                "ADD COLUMN assigned_operator_id INTEGER"
+            ),
+            "status": (
+                "ALTER TABLE report "
+                "ADD COLUMN status TEXT DEFAULT 'Unassigned'"
+            ),
+            "assigned_at": (
+                "ALTER TABLE report "
+                "ADD COLUMN assigned_at DATETIME"
+            ),
+            "completed_at": (
+                "ALTER TABLE report "
+                "ADD COLUMN completed_at DATETIME"
+            ),
+        }
+
+        for column_name, statement in migration_statements.items():
+            if column_name not in existing_columns:
+                try:
+                    db.session.execute(db.text(statement))
+                    db.session.commit()
+                    print(
+                        f"Database migration: added {column_name}"
+                    )
+                except Exception as migration_error:
+                    db.session.rollback()
+                    print(
+                        f"Database migration warning for "
+                        f"{column_name}: {migration_error}"
+                    )
 
 
 # ============================================================
@@ -177,65 +254,52 @@ with app.app_context():
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
-
     print(
         "WARNING: GEMINI_API_KEY is not configured."
     )
-
     client = None
-
 else:
-
     try:
-
         client = genai.Client(
             api_key=GEMINI_API_KEY
         )
-
     except Exception as e:
-
         print(
             f"WARNING: Gemini client initialization failed: {e}"
         )
-
         client = None
 
 
-# Gemini models
-#
-# Primary: Gemini 3.6 Flash
-# Fallback: Gemini 3.5 Flash-Lite
-#
-# Both support image input and text output.
 GEMINI_MODEL = os.getenv(
     "GEMINI_MODEL",
-    "gemini-3.6-flash"
+    "gemini-3.6-flash",
 )
 
 GEMINI_FALLBACK_MODEL = os.getenv(
     "GEMINI_FALLBACK_MODEL",
-    "gemini-3.5-flash-lite"
+    "gemini-3.5-flash-lite",
 )
 
-# Retry settings for temporary Gemini 503/429/5xx errors.
 GEMINI_MAX_RETRIES = int(
-    os.getenv("GEMINI_MAX_RETRIES", "2")
+    os.getenv(
+        "GEMINI_MAX_RETRIES",
+        "2",
+    )
 )
 
 GEMINI_RETRY_DELAY = float(
-    os.getenv("GEMINI_RETRY_DELAY", "2")
+    os.getenv(
+        "GEMINI_RETRY_DELAY",
+        "2",
+    )
 )
 
-
-# ============================================================
-# GEMINI STARTUP STATUS
-# ============================================================
 
 if client is not None:
     print(
         "Gemini configured:",
         f"primary={GEMINI_MODEL}, "
-        f"fallback={GEMINI_FALLBACK_MODEL}"
+        f"fallback={GEMINI_FALLBACK_MODEL}",
     )
 else:
     print(
@@ -245,127 +309,84 @@ else:
 
 
 # ============================================================
+# IN-MEMORY AUTH TOKENS
+# ============================================================
+#
+# Admin token:
+#     token -> nothing
+#
+# Operator token:
+#     token -> operator user id
+#
+# Tokens disappear when Flask is restarted.
+# ============================================================
+
+app.admin_tokens = set()
+app.operator_tokens = {}
+
+
+# ============================================================
 # PASSWORD HELPERS
 # ============================================================
 
-def hash_password(password):
-    """
-    Securely hash a user's password.
-    """
 
-    return generate_password_hash(
-        password
-    )
+def hash_password(password):
+    return generate_password_hash(password)
 
 
 def verify_password(password, stored_password):
-    """
-    Verify a password.
-
-    New accounts use Werkzeug password hashes.
-
-    Older development accounts may have plain-text
-    passwords from the previous version. Those are
-    temporarily supported so the application does not
-    break when an existing database is used.
-    """
-
     if not stored_password:
         return False
 
-    # New hashed password
     try:
-
-        if stored_password.startswith(
-            "pbkdf2:"
-        ) or stored_password.startswith(
-            "scrypt:"
+        if (
+            stored_password.startswith("pbkdf2:")
+            or stored_password.startswith("scrypt:")
         ):
-
             return check_password_hash(
                 stored_password,
-                password
+                password,
             )
-
     except Exception:
         return False
 
-    # Legacy plain-text password
+    # Compatibility for old development accounts.
     return password == stored_password
 
 
 # ============================================================
-# USERNAME VALIDATION
+# VALIDATION HELPERS
 # ============================================================
 
+
 def validate_username(username):
-
     if not username:
-
-        return (
-            False,
-            "Username is required."
-        )
+        return False, "Username is required."
 
     username = username.strip()
 
     if len(username) < 3:
-
-        return (
-            False,
-            "Username must be at least 3 characters."
-        )
+        return False, "Username must be at least 3 characters."
 
     if len(username) > 50:
+        return False, "Username must be 50 characters or less."
 
-        return (
-            False,
-            "Username must be 50 characters or less."
-        )
-
-    return (
-        True,
-        ""
-    )
+    return True, ""
 
 
 def validate_password(password):
-
     if not password:
-
-        return (
-            False,
-            "Password is required."
-        )
+        return False, "Password is required."
 
     if len(password) < 6:
+        return False, "Password must be at least 6 characters."
 
-        return (
-            False,
-            "Password must be at least 6 characters."
-        )
+    return True, ""
 
-    return (
-        True,
-        ""
-    )
-
-
-# ============================================================
-# GET USERNAME FROM REQUEST
-# ============================================================
 
 def get_username_from_request():
-
-    # --------------------------------------------------------
-    # JSON request
-    # --------------------------------------------------------
-
     if request.is_json:
-
-        data = request.get_json(
-            silent=True
-        ) or {}
+        data = request.get_json(silent=True) or {}
 
         username = (
             data.get("username")
@@ -377,10 +398,6 @@ def get_username_from_request():
             if username
             else None
         )
-
-    # --------------------------------------------------------
-    # FormData request
-    # --------------------------------------------------------
 
     username = (
         request.form.get("username")
@@ -394,60 +411,71 @@ def get_username_from_request():
     )
 
 
-# ============================================================
-# GET PASSWORD FROM REQUEST
-# ============================================================
-
 def get_password_from_request():
-
     if request.is_json:
-
-        data = request.get_json(
-            silent=True
-        ) or {}
-
+        data = request.get_json(silent=True) or {}
         return data.get("password")
 
-    return request.form.get(
-        "password"
-    )
+    return request.form.get("password")
 
 
 # ============================================================
-# GET UPLOAD FOLDER
+# DATE HELPERS
 # ============================================================
 
-UPLOAD_FOLDER = "uploads"
+
+def serialize_created_at(value):
+    if not value:
+        return None
+
+    if value.tzinfo is None:
+        value = value.replace(
+            tzinfo=INDIA_TIMEZONE
+        )
+    else:
+        value = value.astimezone(
+            INDIA_TIMEZONE
+        )
+
+    return value.isoformat()
+
+
+# ============================================================
+# UPLOAD FOLDER
+# ============================================================
+
+UPLOAD_FOLDER = os.path.join(
+    app.root_path,
+    "uploads",
+)
 
 os.makedirs(
     UPLOAD_FOLDER,
-    exist_ok=True
+    exist_ok=True,
 )
 
 
 # ============================================================
-# STATIC FILES
+# STATIC UPLOADED FILES
 # ============================================================
+
 
 @app.route(
     "/uploads/<path:filename>"
 )
 def uploaded_file(filename):
-
     return send_from_directory(
         UPLOAD_FOLDER,
-        filename
+        filename,
     )
 
 
 # ============================================================
-# GEMINI IMAGE ANALYSIS
+# GEMINI HELPERS
 # ============================================================
 
+
 def _is_retryable_gemini_error(error):
-    """
-    Identify temporary Gemini/API errors that are safe to retry.
-    """
     message = str(error).upper()
 
     retryable_codes = (
@@ -468,18 +496,22 @@ def _is_retryable_gemini_error(error):
     )
 
 
-def _run_gemini_with_retry(model, uploaded_file, prompt):
-    """
-    Run one Gemini model with exponential backoff.
-    """
+def _run_gemini_with_retry(
+    model,
+    uploaded_file,
+    prompt,
+):
     last_error = None
-    total_attempts = GEMINI_MAX_RETRIES + 1
+
+    total_attempts = (
+        GEMINI_MAX_RETRIES + 1
+    )
 
     for attempt in range(total_attempts):
-
         try:
             print(
-                f"Gemini attempt {attempt + 1}/{total_attempts} "
+                f"Gemini attempt "
+                f"{attempt + 1}/{total_attempts} "
                 f"using {model}..."
             )
 
@@ -487,17 +519,18 @@ def _run_gemini_with_retry(model, uploaded_file, prompt):
                 model=model,
                 contents=[
                     uploaded_file,
-                    prompt
+                    prompt,
                 ],
                 config=types.GenerateContentConfig(
-                    temperature=0
-                )
+                    temperature=0,
+                ),
             )
 
             if response and response.text:
                 print(
                     f"Gemini analysis succeeded using {model}."
                 )
+
                 return response.text.strip()
 
             last_error = RuntimeError(
@@ -505,7 +538,6 @@ def _run_gemini_with_retry(model, uploaded_file, prompt):
             )
 
         except Exception as e:
-
             last_error = e
 
             print(
@@ -534,18 +566,6 @@ def _run_gemini_with_retry(model, uploaded_file, prompt):
 
 
 def analyze_image_with_gemini(filepath):
-
-    """
-    Analyze a road image using Gemini.
-
-    Flow:
-        1. Upload image to Gemini.
-        2. Try Gemini 3.6 Flash.
-        3. Retry temporary failures with exponential backoff.
-        4. If still unavailable, try Gemini 3.5 Flash-Lite.
-        5. Return a concise road-damage assessment.
-    """
-
     if client is None:
         return (
             "AI analysis unavailable. "
@@ -559,23 +579,17 @@ def analyze_image_with_gemini(filepath):
         )
 
     try:
-
-        # ----------------------------------------------------
-        # Upload image once; reuse it for both models.
-        # ----------------------------------------------------
-
         uploaded_file = client.files.upload(
             file=filepath
         )
 
-        # ----------------------------------------------------
-        # RoadGuard AI inspection prompt
-        # ----------------------------------------------------
-
         prompt = """
 You are RoadGuard AI, a road-damage visual inspection system.
 
-Inspect ONLY the visible road condition in the image. Do not use assumptions about location, weather, traffic, road ownership, or information outside the image.
+Inspect ONLY the visible road condition in the image.
+
+Do not use assumptions about location, weather, traffic,
+road ownership, or information outside the image.
 
 Damage Type — choose exactly one:
 - Pothole
@@ -586,38 +600,36 @@ Damage Type — choose exactly one:
 - Other
 - No visible road damage
 
-Severity — choose exactly one using these strict visual criteria:
+Severity — choose exactly one:
 
 Minor:
 - Small or localized visible damage.
 - Limited apparent effect on the road surface.
-- No clear sign of major structural deterioration.
 
 Moderate:
 - Clearly visible damage affecting a noticeable area.
-- More than a minor defect, but the road surface still appears generally serviceable.
-- No strong visual evidence of extensive structural failure.
+- More than a minor defect, but the road still appears generally serviceable.
 
 Severe:
 - Large, deep, extensive, or widespread damage.
-- Multiple significant defects or clear substantial deterioration.
-- Strong visual evidence that repair is needed soon.
+- Multiple significant defects or substantial deterioration.
 
 Critical:
-- Extremely extensive/deep damage, major structural failure, severe collapse, or an immediate and obvious major safety hazard.
-- Use Critical only when the image provides strong visual evidence for this level.
+- Extremely extensive/deep damage,
+- major structural failure,
+- severe collapse,
+- or an immediate obvious major safety hazard.
 
 Not determinable:
-- Use this when image quality, angle, obstruction, or visible evidence is insufficient.
+- Image quality, angle, obstruction, or visible evidence is insufficient.
 
 IMPORTANT:
 - Do not upgrade severity merely because the damage is a pothole.
-- Do not call damage Severe or Critical without visible evidence supporting that level.
-- Do not infer hidden damage beneath the road surface.
-- When evidence is between two levels, choose the lower level unless the image clearly supports the higher level.
-- Judge visible extent, depth, spread, and structural appearance.
-- Be conservative and consistent.
-- Do NOT determine Priority or Priority Score. The Flask backend calculates those values.
+- Do not call damage Severe or Critical without visible evidence.
+- Do not infer hidden damage.
+- When evidence is between two levels, choose the lower level unless clearly supported.
+- Do NOT determine Priority or Priority Score.
+- The Flask backend calculates priority.
 
 Evidence:
 Describe only visible evidence in one or two short sentences.
@@ -625,37 +637,28 @@ Describe only visible evidence in one or two short sentences.
 Recommendation:
 Give one short practical road-maintenance recommendation.
 
-Return ONLY these four fields, each on its own separate line:
+Return ONLY these four fields, each on its own line:
 
 Damage Type: ...
 Severity: ...
 Evidence: ...
 Recommendation: ...
 
-Do not add headings, explanations, markdown, or extra lines.
+Do not add headings, markdown, or extra lines.
 """
-
-        # ----------------------------------------------------
-        # Primary model
-        # ----------------------------------------------------
 
         try:
             return _run_gemini_with_retry(
                 GEMINI_MODEL,
                 uploaded_file,
-                prompt
+                prompt,
             )
 
         except Exception as primary_error:
-
             print(
                 "Primary Gemini model failed:",
-                str(primary_error)
+                str(primary_error),
             )
-
-            # ------------------------------------------------
-            # Fallback model for temporary service failures
-            # ------------------------------------------------
 
             if (
                 GEMINI_FALLBACK_MODEL
@@ -664,24 +667,22 @@ Do not add headings, explanations, markdown, or extra lines.
                     primary_error
                 )
             ):
-
                 print(
                     "Trying Gemini fallback model:",
-                    GEMINI_FALLBACK_MODEL
+                    GEMINI_FALLBACK_MODEL,
                 )
 
                 try:
                     return _run_gemini_with_retry(
                         GEMINI_FALLBACK_MODEL,
                         uploaded_file,
-                        prompt
+                        prompt,
                     )
 
                 except Exception as fallback_error:
-
                     print(
                         "Fallback Gemini model failed:",
-                        str(fallback_error)
+                        str(fallback_error),
                     )
 
                     return (
@@ -696,10 +697,9 @@ Do not add headings, explanations, markdown, or extra lines.
             )
 
     except Exception as e:
-
         print(
             "Gemini image processing error:",
-            str(e)
+            str(e),
         )
 
         return (
@@ -709,7 +709,7 @@ Do not add headings, explanations, markdown, or extra lines.
 
 
 # ============================================================
-# GEMINI RESULT PARSING + SMART PRIORITY SCORING
+# AI RESULT PARSING + PRIORITY
 # ============================================================
 
 DAMAGE_TYPES = {
@@ -760,12 +760,18 @@ DAMAGE_TYPE_WEIGHTS = {
 def _clean_ai_value(value):
     if value is None:
         return ""
-    return re.sub(r"\s+", " ", str(value)).strip()
+
+    return re.sub(
+        r"\s+",
+        " ",
+        str(value),
+    ).strip()
 
 
 def parse_gemini_analysis(analysis):
-    """Parse current four-field and older five-field Gemini responses."""
-    text = str(analysis or "").strip()
+    text = str(
+        analysis or ""
+    ).strip()
 
     if (
         not text
@@ -797,74 +803,83 @@ def parse_gemini_analysis(analysis):
             match = re.match(
                 pattern,
                 line,
-                flags=re.IGNORECASE
+                flags=re.IGNORECASE,
             )
 
             if match:
-                fields[key] = _clean_ai_value(match.group(1))
+                fields[key] = _clean_ai_value(
+                    match.group(1)
+                )
                 break
 
-    damage_raw = _clean_ai_value(fields.get("damage_type"))
-    severity_raw = _clean_ai_value(fields.get("severity"))
-    priority_raw = _clean_ai_value(fields.get("priority"))
+    damage_raw = _clean_ai_value(
+        fields.get("damage_type")
+    )
+
+    severity_raw = _clean_ai_value(
+        fields.get("severity")
+    )
+
+    priority_raw = _clean_ai_value(
+        fields.get("priority")
+    )
 
     return {
         "damage_type": DAMAGE_TYPES.get(
             damage_raw.lower(),
-            "Other" if damage_raw else None
+            "Other" if damage_raw else None,
         ),
         "severity": SEVERITIES.get(
             severity_raw.lower(),
-            "Not determinable" if severity_raw else None
+            "Not determinable" if severity_raw else None,
         ),
-        # Compatibility only for older stored Gemini responses.
         "priority": PRIORITIES.get(
             priority_raw.lower(),
-            "Not determinable" if priority_raw else None
+            "Not determinable" if priority_raw else None,
         ),
         "evidence": fields.get("evidence"),
         "recommendation": fields.get("recommendation"),
     }
 
 
-def calculate_priority_score(damage_type, severity):
-    """
-    Deterministic maintenance score.
-    Severity is the main factor; damage type adds a small weight.
-    Maximum score is 100.
-    """
+def calculate_priority_score(
+    damage_type,
+    severity,
+):
     if not severity:
         return None
 
-    severity_key = str(severity).strip().lower()
-    damage_key = str(damage_type or "").strip().lower()
+    severity_key = str(
+        severity
+    ).strip().lower()
+
+    damage_key = str(
+        damage_type or ""
+    ).strip().lower()
 
     if severity_key == "not determinable":
         return 0
 
     severity_score = SEVERITY_SCORES.get(
         severity_key,
-        0
+        0,
     )
 
     damage_weight = DAMAGE_TYPE_WEIGHTS.get(
         damage_key,
-        0
+        0,
     )
 
     return min(
-        max(severity_score + damage_weight, 0),
-        100
+        max(
+            severity_score + damage_weight,
+            0,
+        ),
+        100,
     )
 
 
 def priority_from_score(score):
-    """
-    0-24   = Low
-    25-49  = Medium
-    50-74  = High
-    75-100 = Critical
-    """
     if score is None:
         return "Not determinable"
 
@@ -884,15 +899,16 @@ def priority_from_score(score):
 
 
 def update_report_from_analysis(report):
-    """Store AI fields and calculate final priority on the backend."""
-    parsed = parse_gemini_analysis(report.analysis)
+    parsed = parse_gemini_analysis(
+        report.analysis
+    )
 
     report.damage_type = parsed["damage_type"]
     report.severity = parsed["severity"]
 
     report.priority_score = calculate_priority_score(
         report.damage_type,
-        report.severity
+        report.severity,
     )
 
     report.priority = priority_from_score(
@@ -902,141 +918,126 @@ def update_report_from_analysis(report):
     return parsed
 
 
-def serialize_created_at(value):
-    """Return a consistent IST ISO timestamp for old and new reports."""
-    if not value:
-        return None
+# ============================================================
+# SERIALIZATION
+# ============================================================
 
-    if value.tzinfo is None:
-        value = value.replace(
-            tzinfo=INDIA_TIMEZONE
-        )
-    else:
-        value = value.astimezone(
-            INDIA_TIMEZONE
-        )
 
-    return value.isoformat()
+def serialize_report(report):
+    return {
+        "id": report.id,
+        "user_id": report.user_id,
+        "location": report.location,
+        "image_path": report.image_path,
+        "analysis": report.analysis,
+        "damage_type": report.damage_type,
+        "severity": report.severity,
+        "priority": report.priority,
+        "priority_score": report.priority_score,
+
+        # Operator tracking
+        "assigned_operator_id": (
+            report.assigned_operator_id
+        ),
+        "status": (
+            report.status or "Unassigned"
+        ),
+        "assigned_at": serialize_created_at(
+            report.assigned_at
+        ),
+        "completed_at": serialize_created_at(
+            report.completed_at
+        ),
+
+        "created_at": serialize_created_at(
+            report.created_at
+        ),
+    }
 
 
 # ============================================================
 # USER REGISTRATION
 # ============================================================
 
+
 @app.route(
     "/api/user/register",
-    methods=["POST"]
+    methods=["POST"],
 )
 def register_user():
-
     username = get_username_from_request()
-
     password = get_password_from_request()
-
-    # --------------------------------------------------------
-    # Validate username
-    # --------------------------------------------------------
 
     valid_username, username_error = (
         validate_username(username)
     )
 
     if not valid_username:
-
         return jsonify({
-            "error": username_error
+            "error": username_error,
         }), 400
-
-    # --------------------------------------------------------
-    # Validate password
-    # --------------------------------------------------------
 
     valid_password, password_error = (
         validate_password(password)
     )
 
     if not valid_password:
-
         return jsonify({
-            "error": password_error
+            "error": password_error,
         }), 400
-
-    # --------------------------------------------------------
-    # Check existing user
-    # --------------------------------------------------------
 
     existing_user = User.query.filter_by(
         email=username
     ).first()
 
     if existing_user:
-
         return jsonify({
             "error": (
                 "Username already exists. "
                 "Please choose another username."
-            )
+            ),
         }), 409
 
-    # --------------------------------------------------------
-    # Create user
-    # --------------------------------------------------------
-
     try:
-
-        hashed_password = hash_password(
-            password
-        )
-
         user = User(
             email=username,
-            password=hashed_password,
-            role="user"
+            password=hash_password(password),
+            role="user",
         )
 
         db.session.add(user)
-
         db.session.commit()
 
         return jsonify({
             "message": "Account created successfully",
             "user_id": user.id,
             "username": user.email,
-            "role": user.role
+            "role": user.role,
         }), 201
 
     except Exception as e:
-
         db.session.rollback()
 
         print(
             "Registration error:",
-            str(e)
+            str(e),
         )
 
         return jsonify({
-            "error": "Unable to create account."
+            "error": "Unable to create account.",
         }), 500
 
 
 # ============================================================
-# REGISTRATION ALIAS
+# SIGNUP ALIAS
 # ============================================================
-#
-# Your current React Register.jsx calls:
-#
-# POST /signup
-#
-# So we provide this endpoint too.
-#
-# ============================================================
+
 
 @app.route(
     "/signup",
-    methods=["POST"]
+    methods=["POST"],
 )
 def signup():
-
     return register_user()
 
 
@@ -1044,138 +1045,115 @@ def signup():
 # USER LOGIN
 # ============================================================
 
+
 @app.route(
     "/api/user/login",
-    methods=["POST"]
+    methods=["POST"],
 )
 def user_login():
-
     username = get_username_from_request()
-
     password = get_password_from_request()
 
-    # --------------------------------------------------------
-    # Validate input
-    # --------------------------------------------------------
-
     if not username or not password:
-
         return jsonify({
             "error": (
                 "Username and password are required."
-            )
+            ),
         }), 400
 
     username = username.strip()
-
-    # --------------------------------------------------------
-    # Find user
-    # --------------------------------------------------------
 
     user = User.query.filter_by(
         email=username
     ).first()
 
     if not user:
-
         return jsonify({
-            "error": "Invalid username or password."
+            "error": "Invalid username or password.",
         }), 401
-
-    # --------------------------------------------------------
-    # Verify password
-    # --------------------------------------------------------
 
     if not verify_password(
         password,
-        user.password
+        user.password,
     ):
-
         return jsonify({
-            "error": "Invalid username or password."
+            "error": "Invalid username or password.",
         }), 401
 
-    # --------------------------------------------------------
-    # Upgrade legacy plain-text password
-    # --------------------------------------------------------
-
+    # Upgrade old plain-text development passwords.
     try:
-
         if not (
             user.password.startswith("pbkdf2:")
             or user.password.startswith("scrypt:")
         ):
-
             user.password = hash_password(
                 password
             )
-
             db.session.commit()
 
     except Exception as e:
-
         print(
             "Password upgrade warning:",
-            str(e)
+            str(e),
         )
 
-    # --------------------------------------------------------
-    # Login successful
-    # --------------------------------------------------------
+    # Operator accounts use the operator portal.
+    if str(user.role).lower() != "user":
+        if str(user.role).lower() == "operator":
+            return jsonify({
+                "error": (
+                    "Operator accounts must use "
+                    "the Operator Login portal."
+                ),
+                "role": "operator",
+            }), 403
+
+        return jsonify({
+            "error": (
+                "This account cannot use the user login."
+            ),
+            "role": user.role,
+        }), 403
 
     return jsonify({
-
         "message": "Login successful",
-
         "user_id": user.id,
-
         "username": user.email,
-
-        "role": user.role
-
+        "role": user.role,
     }), 200
 
 
 # ============================================================
 # LOGIN ALIAS
 # ============================================================
-#
-# Your current React Login.jsx calls:
-#
-# POST /login
-#
-# So we provide this endpoint too.
-#
-# ============================================================
+
 
 @app.route(
     "/login",
-    methods=["POST"]
+    methods=["POST"],
 )
 def login():
-
     return user_login()
 
 
 # ============================================================
 # ADMIN LOGIN
 # ============================================================
-@app.route("/api/admin/login", methods=["POST"])
-@app.route("/admin/login", methods=["POST"])
+
+
+@app.route(
+    "/api/admin/login",
+    methods=["POST"],
+)
+@app.route(
+    "/admin/login",
+    methods=["POST"],
+)
 def admin_login():
-    """
-    Administrator login.
-
-    After successful backend verification, a random admin token is
-    returned. Protected admin requests must send this token as:
-
-        Authorization: Bearer <admin_token>
-
-    Tokens live only while this Flask process is running.
-    """
-
     if request.is_json:
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(
+            silent=True
+        ) or {}
 
         email = (
             data.get("email")
@@ -1192,7 +1170,10 @@ def admin_login():
             or ""
         ).strip()
 
-        password = request.form.get("password") or ""
+        password = (
+            request.form.get("password")
+            or ""
+        )
 
     ADMIN_EMAIL = "admin@gmail.com"
     ADMIN_PASSWORD = "Admin@123"
@@ -1202,38 +1183,42 @@ def admin_login():
         or password != ADMIN_PASSWORD
     ):
         return jsonify({
-            "message": "Invalid administrator credentials."
+            "message": (
+                "Invalid administrator credentials."
+            ),
         }), 401
 
-    if not hasattr(app, "admin_tokens"):
-        app.admin_tokens = set()
-
     admin_token = secrets.token_urlsafe(32)
-    app.admin_tokens.add(admin_token)
+
+    app.admin_tokens.add(
+        admin_token
+    )
 
     return jsonify({
-        "message": "Administrator login successful.",
+        "message": (
+            "Administrator login successful."
+        ),
         "role": "admin",
         "username": "Administrator",
         "email": ADMIN_EMAIL,
-        "admin_token": admin_token
+        "admin_token": admin_token,
     }), 200
 
 
 # ============================================================
-# ADMIN AUTHENTICATION HELPER
+# ADMIN TOKEN AUTHENTICATION
 # ============================================================
 
+
 def require_admin_token():
-    """
-    Verify the admin token from:
+    authorization = request.headers.get(
+        "Authorization",
+        "",
+    )
 
-        Authorization: Bearer <admin_token>
-    """
-
-    authorization = request.headers.get("Authorization", "")
-
-    if not authorization.startswith("Bearer "):
+    if not authorization.startswith(
+        "Bearer "
+    ):
         return False
 
     token = authorization[7:].strip()
@@ -1241,44 +1226,819 @@ def require_admin_token():
     if not token:
         return False
 
-    admin_tokens = getattr(app, "admin_tokens", set())
-
-    return token in admin_tokens
+    return token in app.admin_tokens
 
 
 # ============================================================
 # ADMIN LOGOUT
 # ============================================================
 
+
 @app.route(
     "/api/admin/logout",
-    methods=["POST"]
+    methods=["POST"],
 )
 def admin_logout():
+    authorization = request.headers.get(
+        "Authorization",
+        "",
+    )
 
-    authorization = request.headers.get("Authorization", "")
+    if authorization.startswith("Bearer "):
+        token = authorization[7:].strip()
+        app.admin_tokens.discard(token)
+
+    return jsonify({
+        "message": (
+            "Administrator logged out successfully."
+        ),
+    }), 200
+
+
+# ============================================================
+# OPERATOR LOGIN
+# ============================================================
+
+
+@app.route(
+    "/api/operator/login",
+    methods=["POST"],
+)
+@app.route(
+    "/operator/login",
+    methods=["POST"],
+)
+def operator_login():
+    username = get_username_from_request()
+    password = get_password_from_request()
+
+    if not username or not password:
+        return jsonify({
+            "error": (
+                "Username and password are required."
+            ),
+        }), 400
+
+    username = username.strip()
+
+    operator = User.query.filter_by(
+        email=username
+    ).first()
+
+    if not operator:
+        return jsonify({
+            "error": "Invalid operator credentials.",
+        }), 401
+
+    if str(operator.role).lower() != "operator":
+        return jsonify({
+            "error": (
+                "This account is not an operator account."
+            ),
+        }), 403
+
+    if not verify_password(
+        password,
+        operator.password,
+    ):
+        return jsonify({
+            "error": "Invalid operator credentials.",
+        }), 401
+
+    # Upgrade legacy password.
+    try:
+        if not (
+            operator.password.startswith("pbkdf2:")
+            or operator.password.startswith("scrypt:")
+        ):
+            operator.password = hash_password(
+                password
+            )
+            db.session.commit()
+
+    except Exception as e:
+        print(
+            "Operator password upgrade warning:",
+            str(e),
+        )
+
+    operator_token = secrets.token_urlsafe(32)
+
+    # IMPORTANT:
+    # token -> operator ID
+    # This lets the backend know which operator is logged in.
+    app.operator_tokens[operator_token] = operator.id
+
+    return jsonify({
+        "message": "Operator login successful.",
+        "user_id": operator.id,
+        "username": operator.email,
+        "email": operator.email,
+        "role": "operator",
+        "operator_token": operator_token,
+    }), 200
+
+
+# ============================================================
+# OPERATOR TOKEN AUTHENTICATION
+# ============================================================
+
+
+def require_operator_token():
+    authorization = request.headers.get(
+        "Authorization",
+        "",
+    )
+
+    if not authorization.startswith(
+        "Bearer "
+    ):
+        return False
+
+    token = authorization[7:].strip()
+
+    if not token:
+        return False
+
+    return token in app.operator_tokens
+
+
+def get_current_operator_id():
+    authorization = request.headers.get(
+        "Authorization",
+        "",
+    )
+
+    if not authorization.startswith(
+        "Bearer "
+    ):
+        return None
+
+    token = authorization[7:].strip()
+
+    if not token:
+        return None
+
+    return app.operator_tokens.get(
+        token
+    )
+
+
+# ============================================================
+# OPERATOR LOGOUT
+# ============================================================
+
+
+@app.route(
+    "/api/operator/logout",
+    methods=["POST"],
+)
+@app.route(
+    "/operator/logout",
+    methods=["POST"],
+)
+def operator_logout():
+    authorization = request.headers.get(
+        "Authorization",
+        "",
+    )
 
     if authorization.startswith("Bearer "):
         token = authorization[7:].strip()
 
-        if hasattr(app, "admin_tokens"):
-            app.admin_tokens.discard(token)
+        app.operator_tokens.pop(
+            token,
+            None,
+        )
 
     return jsonify({
-        "message": "Administrator logged out successfully."
+        "message": (
+            "Operator logged out successfully."
+        ),
     }), 200
+
+
+# ============================================================
+# ADMIN - CREATE OPERATOR
+# ============================================================
+
+
+@app.route(
+    "/api/admin/operators",
+    methods=["POST"],
+)
+def create_operator():
+    if not require_admin_token():
+        return jsonify({
+            "error": (
+                "Administrator authentication required."
+            ),
+        }), 401
+
+    if request.is_json:
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        username = (
+            data.get("username")
+            or data.get("email")
+            or ""
+        ).strip()
+
+        password = data.get("password") or ""
+
+    else:
+        username = (
+            request.form.get("username")
+            or request.form.get("email")
+            or ""
+        ).strip()
+
+        password = (
+            request.form.get("password")
+            or ""
+        )
+
+    valid_username, username_error = (
+        validate_username(username)
+    )
+
+    if not valid_username:
+        return jsonify({
+            "error": username_error,
+        }), 400
+
+    valid_password, password_error = (
+        validate_password(password)
+    )
+
+    if not valid_password:
+        return jsonify({
+            "error": password_error,
+        }), 400
+
+    existing_user = User.query.filter_by(
+        email=username
+    ).first()
+
+    if existing_user:
+        return jsonify({
+            "error": (
+                "An account with this username "
+                "already exists."
+            ),
+        }), 409
+
+    try:
+        operator = User(
+            email=username,
+            password=hash_password(password),
+            role="operator",
+        )
+
+        db.session.add(operator)
+        db.session.commit()
+
+        return jsonify({
+            "message": (
+                "Operator created successfully."
+            ),
+            "operator": {
+                "id": operator.id,
+                "username": operator.email,
+                "email": operator.email,
+                "role": operator.role,
+            },
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+
+        print(
+            "Create operator error:",
+            str(e),
+        )
+
+        return jsonify({
+            "error": "Unable to create operator.",
+        }), 500
+
+
+# ============================================================
+# ADMIN - GET OPERATORS
+# ============================================================
+
+
+@app.route(
+    "/api/admin/operators",
+    methods=["GET"],
+)
+def get_operators():
+    if not require_admin_token():
+        return jsonify({
+            "error": (
+                "Administrator authentication required."
+            ),
+        }), 401
+
+    try:
+        operators = (
+            User.query
+            .filter_by(role="operator")
+            .order_by(User.id.desc())
+            .all()
+        )
+
+        # Return an array because this is the format normally
+        # consumed by the Admin Dashboard.
+        return jsonify([
+            {
+                "id": operator.id,
+                "username": operator.email,
+                "email": operator.email,
+                "role": operator.role,
+            }
+            for operator in operators
+        ]), 200
+
+    except Exception as e:
+        print(
+            "Get operators error:",
+            str(e),
+        )
+
+        return jsonify({
+            "error": "Unable to load operators.",
+        }), 500
+
+
+# ============================================================
+# ADMIN - GET USERS
+# ============================================================
+
+
+@app.route(
+    "/api/admin/users",
+    methods=["GET"],
+)
+def get_users():
+    if not require_admin_token():
+        return jsonify({
+            "error": (
+                "Administrator authentication required."
+            ),
+        }), 401
+
+    try:
+        users = (
+            User.query
+            .filter(
+                User.role.isnot(None),
+                User.role.ilike("user"),
+            )
+            .order_by(User.id.desc())
+            .all()
+        )
+
+        return jsonify([
+            {
+                "id": user.id,
+                "username": user.email,
+                "email": user.email,
+                "role": user.role,
+            }
+            for user in users
+        ]), 200
+
+    except Exception as e:
+        db.session.rollback()
+        print("Get users error:", str(e))
+
+        return jsonify({
+            "error": "Unable to load users.",
+        }), 500
+
+
+
+
+# ============================================================
+# ADMIN - DELETE OPERATOR
+# ============================================================
+
+
+@app.route(
+    "/api/admin/operators/<int:operator_id>",
+    methods=["DELETE"],
+)
+def delete_operator(operator_id):
+    if not require_admin_token():
+        return jsonify({
+            "error": (
+                "Administrator authentication required."
+            ),
+        }), 401
+
+    operator = db.session.get(
+        User,
+        operator_id,
+    )
+
+    if not operator:
+        return jsonify({
+            "error": "Operator not found.",
+        }), 404
+
+    if str(operator.role).lower() != "operator":
+        return jsonify({
+            "error": (
+                "The selected account is not an operator."
+            ),
+        }), 400
+
+    try:
+        # Reports assigned to a deleted operator become
+        # available again for assignment.
+        assigned_reports = (
+            Report.query
+            .filter_by(
+                assigned_operator_id=operator.id
+            )
+            .all()
+        )
+
+        for report in assigned_reports:
+            report.assigned_operator_id = None
+            report.status = "Unassigned"
+            report.assigned_at = None
+            report.completed_at = None
+
+        # Remove active tokens belonging to this operator.
+        tokens_to_remove = [
+            token
+            for token, user_id
+            in app.operator_tokens.items()
+            if user_id == operator.id
+        ]
+
+        for token in tokens_to_remove:
+            app.operator_tokens.pop(
+                token,
+                None,
+            )
+
+        db.session.delete(operator)
+        db.session.commit()
+
+        return jsonify({
+            "message": (
+                "Operator deleted successfully."
+            ),
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+
+        print(
+            "Delete operator error:",
+            str(e),
+        )
+
+        return jsonify({
+            "error": "Unable to delete operator.",
+        }), 500
+
+
+# ============================================================
+# ADMIN - ASSIGN REPORT TO OPERATOR
+# ============================================================
+
+
+@app.route(
+    "/api/admin/reports/<int:report_id>/assign",
+    methods=["POST", "PUT"],
+)
+def assign_report_to_operator(report_id):
+    if not require_admin_token():
+        return jsonify({
+            "error": (
+                "Administrator authentication required."
+            ),
+        }), 401
+
+    report = db.session.get(
+        Report,
+        report_id,
+    )
+
+    if not report:
+        return jsonify({
+            "error": "Report not found.",
+        }), 404
+
+    data = request.get_json(
+        silent=True
+    ) or {}
+
+    operator_id = data.get(
+        "operator_id"
+    )
+
+    if operator_id in (None, ""):
+        return jsonify({
+            "error": "Operator ID is required.",
+        }), 400
+
+    try:
+        operator_id = int(operator_id)
+    except (TypeError, ValueError):
+        return jsonify({
+            "error": (
+                "Operator ID must be a valid number."
+            ),
+        }), 400
+
+    operator = db.session.get(
+        User,
+        operator_id,
+    )
+
+    if not operator:
+        return jsonify({
+            "error": "Operator not found.",
+        }), 404
+
+    if str(operator.role).lower() != "operator":
+        return jsonify({
+            "error": (
+                "The selected account is not an operator."
+            ),
+        }), 400
+
+    try:
+        report.assigned_operator_id = operator.id
+        report.status = "Assigned"
+        report.assigned_at = datetime.now(
+            INDIA_TIMEZONE
+        )
+        report.completed_at = None
+
+        db.session.commit()
+
+        return jsonify({
+            "message": (
+                "Report assigned successfully."
+            ),
+            "report_id": report.id,
+            "assigned_operator_id": operator.id,
+            "operator_username": operator.email,
+            "status": report.status,
+            "assigned_at": serialize_created_at(
+                report.assigned_at
+            ),
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+
+        print(
+            "Assign report error:",
+            str(e),
+        )
+
+        return jsonify({
+            "error": "Unable to assign report.",
+        }), 500
+
+
+# ============================================================
+# ADMIN - UNASSIGN REPORT
+# ============================================================
+
+
+@app.route(
+    "/api/admin/reports/<int:report_id>/unassign",
+    methods=["POST", "PUT"],
+)
+def unassign_report(report_id):
+    if not require_admin_token():
+        return jsonify({
+            "error": (
+                "Administrator authentication required."
+            ),
+        }), 401
+
+    report = db.session.get(
+        Report,
+        report_id,
+    )
+
+    if not report:
+        return jsonify({
+            "error": "Report not found.",
+        }), 404
+
+    try:
+        report.assigned_operator_id = None
+        report.status = "Unassigned"
+        report.assigned_at = None
+        report.completed_at = None
+
+        db.session.commit()
+
+        return jsonify({
+            "message": (
+                "Report unassigned successfully."
+            ),
+            "report_id": report.id,
+            "status": report.status,
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+
+        print(
+            "Unassign report error:",
+            str(e),
+        )
+
+        return jsonify({
+            "error": "Unable to unassign report.",
+        }), 500
+
+
+# ============================================================
+# OPERATOR - GET ASSIGNED REPORTS
+# ============================================================
+
+
+@app.route(
+    "/api/operator/reports",
+    methods=["GET"],
+)
+def get_operator_reports():
+    if not require_operator_token():
+        return jsonify({
+            "error": (
+                "Operator authentication required."
+            ),
+        }), 401
+
+    operator_id = get_current_operator_id()
+
+    if not operator_id:
+        return jsonify({
+            "error": "Invalid operator session.",
+        }), 401
+
+    try:
+        reports = (
+            Report.query
+            .filter_by(
+                assigned_operator_id=operator_id
+            )
+            .order_by(
+                Report.id.desc()
+            )
+            .all()
+        )
+
+        return jsonify([
+            serialize_report(report)
+            for report in reports
+        ]), 200
+
+    except Exception as e:
+        print(
+            "Operator reports error:",
+            str(e),
+        )
+
+        return jsonify({
+            "error": (
+                "Unable to load assigned reports."
+            ),
+        }), 500
+
+
+# ============================================================
+# OPERATOR - UPDATE REPORT STATUS
+# ============================================================
+
+
+@app.route(
+    "/api/operator/reports/<int:report_id>/status",
+    methods=["PUT", "PATCH"],
+)
+def update_operator_report_status(report_id):
+    if not require_operator_token():
+        return jsonify({
+            "error": (
+                "Operator authentication required."
+            ),
+        }), 401
+
+    operator_id = get_current_operator_id()
+
+    if not operator_id:
+        return jsonify({
+            "error": "Invalid operator session.",
+        }), 401
+
+    report = db.session.get(
+        Report,
+        report_id,
+    )
+
+    if not report:
+        return jsonify({
+            "error": "Report not found.",
+        }), 404
+
+    if report.assigned_operator_id != operator_id:
+        return jsonify({
+            "error": (
+                "This report is not assigned to you."
+            ),
+        }), 403
+
+    data = request.get_json(
+        silent=True
+    ) or {}
+
+    new_status = str(
+        data.get("status", "")
+    ).strip()
+
+    allowed_statuses = {
+        "In Progress",
+        "Completed",
+    }
+
+    if new_status not in allowed_statuses:
+        return jsonify({
+            "error": (
+                "Status must be In Progress or Completed."
+            ),
+        }), 400
+
+    now = datetime.now(
+        INDIA_TIMEZONE
+    )
+
+    try:
+        report.status = new_status
+
+        if new_status == "In Progress":
+            report.completed_at = None
+
+        elif new_status == "Completed":
+            report.completed_at = now
+
+        db.session.commit()
+
+        return jsonify({
+            "message": (
+                "Report status updated successfully."
+            ),
+            "report_id": report.id,
+            "status": report.status,
+            "assigned_operator_id": (
+                report.assigned_operator_id
+            ),
+            "assigned_at": serialize_created_at(
+                report.assigned_at
+            ),
+            "completed_at": serialize_created_at(
+                report.completed_at
+            ),
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+
+        print(
+            "Operator status update error:",
+            str(e),
+        )
+
+        return jsonify({
+            "error": (
+                "Unable to update report status."
+            ),
+        }), 500
 
 
 # ============================================================
 # REPORT UPLOAD
 # ============================================================
 
+
 @app.route(
     "/api/report/upload",
-    methods=["POST"]
+    methods=["POST"],
 )
 def upload_report():
-
     user_id = request.form.get(
         "user_id"
     )
@@ -1291,76 +2051,66 @@ def upload_report():
         "image"
     )
 
-    # --------------------------------------------------------
-    # Validate fields
-    # --------------------------------------------------------
-
     if not user_id:
-
         return jsonify({
-            "error": "User ID is required."
+            "error": "User ID is required.",
         }), 400
 
     if not location:
-
         return jsonify({
-            "error": "Location is required."
+            "error": "Location is required.",
         }), 400
 
     if not image:
-
         return jsonify({
-            "error": "Road image is required."
+            "error": "Road image is required.",
         }), 400
 
-    # --------------------------------------------------------
-    # Validate user exists
-    # --------------------------------------------------------
-
     try:
-
-        user = db.session.get(User, int(user_id))
-
+        user = db.session.get(
+            User,
+            int(user_id),
+        )
     except Exception:
-
         user = None
 
     if not user:
-
         return jsonify({
-            "error": "Invalid user."
+            "error": "Invalid user.",
         }), 401
 
-    # --------------------------------------------------------
-    # Generate safe unique filename
-    # --------------------------------------------------------
+    # A report must be created by a normal user.
+    if str(user.role).lower() != "user":
+        return jsonify({
+            "error": (
+                "Only regular users can create road reports."
+            ),
+        }), 403
 
     original_name = image.filename
 
     if not original_name:
-
         return jsonify({
-            "error": "Invalid image filename."
+            "error": "Invalid image filename.",
         }), 400
 
     extension = os.path.splitext(
         original_name
     )[1].lower()
 
-    allowed_extensions = [
+    allowed_extensions = {
         ".jpg",
         ".jpeg",
         ".png",
-        ".webp"
-    ]
+        ".webp",
+    }
 
     if extension not in allowed_extensions:
-
         return jsonify({
             "error": (
                 "Only JPG, JPEG, PNG and WEBP "
                 "images are supported."
-            )
+            ),
         }), 400
 
     filename = (
@@ -1370,114 +2120,81 @@ def upload_report():
 
     filepath = os.path.join(
         UPLOAD_FOLDER,
-        filename
+        filename,
     )
 
-    # --------------------------------------------------------
-    # Save image
-    # --------------------------------------------------------
-
     try:
-
-        image.save(
-            filepath
-        )
-
+        image.save(filepath)
     except Exception as e:
-
         print(
             "Image save error:",
-            str(e)
+            str(e),
         )
 
         return jsonify({
-            "error": "Unable to save image."
+            "error": "Unable to save image.",
         }), 500
 
     image_path = (
         f"/uploads/{filename}"
     )
 
-    # --------------------------------------------------------
-    # Create report
-    # --------------------------------------------------------
-
-    # Capture upload time before Gemini analysis so AI processing
-    # time does not affect the displayed report timestamp.
     upload_time = datetime.now(
         INDIA_TIMEZONE
     )
 
     report = Report(
-
         user_id=int(user_id),
-
         location=location,
-
         image_path=image_path,
-
         analysis="Pending analysis",
-
-        created_at=upload_time
-
+        status="Unassigned",
+        assigned_operator_id=None,
+        assigned_at=None,
+        completed_at=None,
+        created_at=upload_time,
     )
 
     try:
+        db.session.add(report)
+        db.session.commit()
 
-        db.session.add(
+    except Exception as e:
+        db.session.rollback()
+
+        print(
+            "Report database error:",
+            str(e),
+        )
+
+        return jsonify({
+            "error": "Unable to save report.",
+        }), 500
+
+    # ========================================================
+    # RUN GEMINI
+    # ========================================================
+
+    try:
+        report.analysis = analyze_image_with_gemini(
+            filepath
+        )
+
+        update_report_from_analysis(
             report
         )
 
         db.session.commit()
 
     except Exception as e:
-
-        db.session.rollback()
-
-        print(
-            "Report database error:",
-            str(e)
-        )
-
-        return jsonify({
-            "error": (
-                "Unable to save report."
-            )
-        }), 500
-
-    # --------------------------------------------------------
-    # RUN AI ANALYSIS
-    # --------------------------------------------------------
-    #
-    # Analyze the image immediately after upload so the user
-    # report can contain the Gemini result without waiting for
-    # the admin dashboard to be opened.
-    #
-    # If Gemini is temporarily unavailable, the upload still
-    # succeeds and the report keeps the failure message. The
-    # admin dashboard can retry failed analyses later.
-    # --------------------------------------------------------
-
-    try:
-
-        report.analysis = analyze_image_with_gemini(
-            filepath
-        )
-
-        update_report_from_analysis(report)
-
-        db.session.commit()
-
-    except Exception as e:
-
         db.session.rollback()
 
         print(
             "Upload-time Gemini analysis error:",
-            str(e)
+            str(e),
         )
 
-        # Keep the report available even if AI is unavailable.
+        # The report remains in the database even if AI fails.
         report.analysis = (
             "AI analysis temporarily unavailable. "
             "The report was uploaded successfully. "
@@ -1487,125 +2204,122 @@ def upload_report():
         try:
             db.session.add(report)
             db.session.commit()
+
         except Exception as save_error:
             db.session.rollback()
+
             print(
                 "Unable to save AI fallback status:",
-                str(save_error)
+                str(save_error),
             )
 
-    # --------------------------------------------------------
-    # Return result
-    # --------------------------------------------------------
-
     return jsonify({
-
         "message": (
             "Report uploaded successfully."
         ),
-
         "report_id": report.id,
-
         "user_id": report.user_id,
-
         "location": report.location,
-
         "image_path": report.image_path,
-
         "analysis": report.analysis,
         "damage_type": report.damage_type,
         "severity": report.severity,
         "priority": report.priority,
         "priority_score": report.priority_score,
-        "created_at": serialize_created_at(report.created_at)
-
+        "assigned_operator_id": (
+            report.assigned_operator_id
+        ),
+        "status": report.status or "Unassigned",
+        "assigned_at": serialize_created_at(
+            report.assigned_at
+        ),
+        "completed_at": serialize_created_at(
+            report.completed_at
+        ),
+        "created_at": serialize_created_at(
+            report.created_at
+        ),
     }), 201
 
 
 # ============================================================
-# GET USER REPORTS
+# USER - GET REPORTS
 # ============================================================
+
 
 @app.route(
     "/api/user/reports/<int:user_id>",
-    methods=["GET"]
+    methods=["GET"],
 )
 def get_user_reports(user_id):
-
-    # --------------------------------------------------------
-    # Verify user
-    # --------------------------------------------------------
-
-    user = db.session.get(User, user_id)
+    user = db.session.get(
+        User,
+        user_id,
+    )
 
     if not user:
-
         return jsonify({
-            "error": "User not found."
+            "error": "User not found.",
         }), 404
 
-    # --------------------------------------------------------
-    # Get reports
-    # --------------------------------------------------------
+    reports = (
+        Report.query
+        .filter_by(
+            user_id=user_id
+        )
+        .order_by(
+            Report.id.desc()
+        )
+        .all()
+    )
 
-    reports = Report.query.filter_by(
-        user_id=user_id
-    ).order_by(
-        Report.id.desc()
-    ).all()
-
-    result = []
-
-    for report in reports:
-
-        result.append({
-
-            "id": report.id,
-
-            "user_id": report.user_id,
-
-            "location": report.location,
-
-            "image_path": report.image_path,
-
-            "analysis": report.analysis,
-            "damage_type": report.damage_type,
-            "severity": report.severity,
-            "priority": report.priority,
-            "priority_score": report.priority_score,
-            "created_at": serialize_created_at(report.created_at)
-
-        })
-
-    return jsonify(
-        result
-    ), 200
+    return jsonify([
+        serialize_report(report)
+        for report in reports
+    ]), 200
 
 
 # ============================================================
-# USER - DELETE ONE REPORT
+# USER - DELETE REPORT
 # ============================================================
+
 
 @app.route(
     "/api/user/reports/<int:user_id>/<int:report_id>",
-    methods=["DELETE"]
+    methods=["DELETE"],
 )
-def delete_user_report(user_id, report_id):
-
-    report = db.session.get(Report, report_id)
+def delete_user_report(
+    user_id,
+    report_id,
+):
+    report = db.session.get(
+        Report,
+        report_id,
+    )
 
     if not report:
-        return jsonify({"error": "Report not found."}), 404
+        return jsonify({
+            "error": "Report not found.",
+        }), 404
 
     if report.user_id != user_id:
         return jsonify({
-            "error": "You are not authorized to delete this report."
+            "error": (
+                "You are not authorized to delete this report."
+            ),
         }), 403
 
     try:
         if report.image_path:
-            filename = os.path.basename(report.image_path)
-            filepath = os.path.join(UPLOAD_FOLDER, filename)
+            filename = os.path.basename(
+                report.image_path
+            )
+
+            filepath = os.path.join(
+                UPLOAD_FOLDER,
+                filename,
+            )
+
             if os.path.isfile(filepath):
                 os.remove(filepath)
 
@@ -1613,175 +2327,127 @@ def delete_user_report(user_id, report_id):
         db.session.commit()
 
         return jsonify({
-            "message": "Report deleted successfully."
+            "message": (
+                "Report deleted successfully."
+            ),
         }), 200
 
     except Exception as e:
         db.session.rollback()
-        print("User report delete error:", str(e))
-        return jsonify({"error": "Unable to delete report."}), 500
+
+        print(
+            "User report delete error:",
+            str(e),
+        )
+
+        return jsonify({
+            "error": (
+                "Unable to delete report."
+            ),
+        }), 500
 
 
 # ============================================================
 # ADMIN - GET ALL REPORTS
 # ============================================================
 
+
 @app.route(
     "/api/admin/reports",
-    methods=["GET"]
+    methods=["GET"],
 )
 def get_all_reports():
-
     if not require_admin_token():
         return jsonify({
-            "error": "Administrator authentication required."
+            "error": (
+                "Administrator authentication required."
+            ),
         }), 401
 
-    reports = Report.query.order_by(
-        Report.id.desc()
-    ).all()
-
-    result = []
-
-    for report in reports:
-
-        # ----------------------------------------------------
-        # Run AI analysis if not already analyzed
-        # ----------------------------------------------------
-
-        analysis_text = (
-            str(report.analysis or "").strip().lower()
+    try:
+        reports = (
+            Report.query
+            .order_by(Report.id.desc())
+            .all()
         )
 
-        needs_ai_analysis = (
-            analysis_text in (
-                "",
-                "pending analysis"
-            )
-            or analysis_text.startswith(
-                "ai analysis failed"
-            )
-            or analysis_text.startswith(
-                "ai analysis temporarily unavailable"
-            )
-        )
+        result = []
 
-        if needs_ai_analysis:
-
-            try:
-
-                # Convert relative path to local path
-                local_path = report.image_path
-
-                if local_path.startswith(
-                    "/uploads/"
-                ):
-
-                    local_path = local_path[
-                        1:
-                    ]
-
-                report.analysis = (
-                    analyze_image_with_gemini(
-                        local_path
-                    )
-                )
-
-                update_report_from_analysis(report)
-
-                db.session.commit()
-
-            except Exception as e:
-
-                db.session.rollback()
-
-                report.analysis = (
-                    "AI analysis failed: "
-                    + str(e)
-                )
-
+        for report in reports:
+            # IMPORTANT:
+            # Loading Reports Management must not call Gemini.
+            # AI analysis happens during upload or explicit retry.
+            # This keeps the dashboard fast and avoids Gemini outages
+            # causing "Failed to fetch".
+            if (
+                report.analysis
+                and report.damage_type is None
+                and report.severity is None
+                and report.priority is None
+            ):
                 try:
-
+                    update_report_from_analysis(report)
                     db.session.commit()
-
-                except Exception:
-
+                except Exception as e:
                     db.session.rollback()
+                    print(
+                        "Structured AI field update warning:",
+                        str(e),
+                    )
 
-        # ----------------------------------------------------
-        # Backfill structured fields for older reports that already
-        # contain a valid Gemini response.
-        if (
-            report.analysis
-            and report.damage_type is None
-            and report.severity is None
-            and report.priority is None
-        ):
-            try:
-                update_report_from_analysis(report)
-                db.session.commit()
-            except Exception as e:
-                db.session.rollback()
-                print(
-                    "Structured AI field update warning:",
-                    str(e)
-                )
+            result.append(
+                serialize_report(report)
+            )
 
-        # Add report to response
-        # ----------------------------------------------------
+        return jsonify(result), 200
 
-        result.append({
+    except Exception as e:
+        db.session.rollback()
+        print("Admin reports error:", str(e))
 
-            "id": report.id,
+        return jsonify({
+            "error": "Unable to load reports.",
+        }), 500
 
-            "user_id": report.user_id,
 
-            "location": report.location,
-
-            "image_path": report.image_path,
-
-            "analysis": report.analysis,
-            "damage_type": report.damage_type,
-            "severity": report.severity,
-            "priority": report.priority,
-            "priority_score": report.priority_score,
-            "created_at": serialize_created_at(report.created_at)
-
-        })
-
-    return jsonify(
-        result
-    ), 200
 
 
 # ============================================================
 # ADMIN - DELETE ONE REPORT
 # ============================================================
 
+
 @app.route(
     "/api/admin/reports/<int:report_id>",
-    methods=["DELETE"]
+    methods=["DELETE"],
 )
 def delete_admin_report(report_id):
-
     if not require_admin_token():
         return jsonify({
-            "error": "Administrator authentication required."
+            "error": (
+                "Administrator authentication required."
+            ),
         }), 401
 
-    report = db.session.get(Report, report_id)
+    report = db.session.get(
+        Report,
+        report_id,
+    )
 
     if not report:
         return jsonify({
-            "error": "Report not found."
+            "error": "Report not found.",
         }), 404
 
     try:
         if report.image_path:
-            filename = os.path.basename(report.image_path)
+            filename = os.path.basename(
+                report.image_path
+            )
+
             filepath = os.path.join(
                 UPLOAD_FOLDER,
-                filename
+                filename,
             )
 
             if os.path.isfile(filepath):
@@ -1791,15 +2457,23 @@ def delete_admin_report(report_id):
         db.session.commit()
 
         return jsonify({
-            "message": "Report deleted successfully."
+            "message": (
+                "Report deleted successfully."
+            ),
         }), 200
 
     except Exception as e:
         db.session.rollback()
-        print("Admin report delete error:", str(e))
+
+        print(
+            "Admin report delete error:",
+            str(e),
+        )
 
         return jsonify({
-            "error": "Unable to delete report."
+            "error": (
+                "Unable to delete report."
+            ),
         }), 500
 
 
@@ -1807,15 +2481,17 @@ def delete_admin_report(report_id):
 # ADMIN - DELETE ALL REPORTS
 # ============================================================
 
+
 @app.route(
     "/api/admin/reports",
-    methods=["DELETE"]
+    methods=["DELETE"],
 )
 def delete_all_admin_reports():
-
     if not require_admin_token():
         return jsonify({
-            "error": "Administrator authentication required."
+            "error": (
+                "Administrator authentication required."
+            ),
         }), 401
 
     reports = Report.query.all()
@@ -1823,10 +2499,13 @@ def delete_all_admin_reports():
     try:
         for report in reports:
             if report.image_path:
-                filename = os.path.basename(report.image_path)
+                filename = os.path.basename(
+                    report.image_path
+                )
+
                 filepath = os.path.join(
                     UPLOAD_FOLDER,
-                    filename
+                    filename,
                 )
 
                 if os.path.isfile(filepath):
@@ -1837,16 +2516,24 @@ def delete_all_admin_reports():
         db.session.commit()
 
         return jsonify({
-            "message": "All reports deleted successfully.",
-            "deleted_count": len(reports)
+            "message": (
+                "All reports deleted successfully."
+            ),
+            "deleted_count": len(reports),
         }), 200
 
     except Exception as e:
         db.session.rollback()
-        print("Admin delete-all error:", str(e))
+
+        print(
+            "Admin delete-all error:",
+            str(e),
+        )
 
         return jsonify({
-            "error": "Unable to delete all reports."
+            "error": (
+                "Unable to delete all reports."
+            ),
         }), 500
 
 
@@ -1854,21 +2541,18 @@ def delete_all_admin_reports():
 # HEALTH CHECK
 # ============================================================
 
+
 @app.route(
     "/",
-    methods=["GET"]
+    methods=["GET"],
 )
 def home():
-
     return jsonify({
-
         "message": (
             "RoadGuard AI backend is running."
         ),
-
-        "status": "online"
-
-    })
+        "status": "online",
+    }), 200
 
 
 # ============================================================
@@ -1876,9 +2560,8 @@ def home():
 # ============================================================
 
 if __name__ == "__main__":
-
     app.run(
         host="127.0.0.1",
         port=5000,
-        debug=True
+        debug=True,
     )

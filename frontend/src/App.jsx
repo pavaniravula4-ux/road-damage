@@ -16,8 +16,16 @@ import MyReports from "./components/MyReports";
 import UploadReports from "./components/UploadReports";
 import Home from "./components/Home";
 import Register from "./components/register";
+import OperatorLogin from "./components/OperatorLogin";
+import OperatorDashboard from "./components/OperatorDashboard";
+
 
 function App() {
+
+  // ============================================================
+  // AUTHENTICATION STATE
+  // ============================================================
+
   const [role, setRole] = useState(
     localStorage.getItem("role") || null
   );
@@ -26,17 +34,49 @@ function App() {
     localStorage.getItem("user_id") || null
   );
 
+
+  // ============================================================
+  // LOGOUT HANDLER
+  // ============================================================
+  //
+  // This clears BOTH:
+  // 1. React authentication state
+  // 2. Browser storage
+  //
+  // This prevents the protected route from immediately
+  // redirecting back to the dashboard.
+  //
+
+  const handleUserLogout = () => {
+
+    localStorage.removeItem("role");
+    localStorage.removeItem("user_id");
+    localStorage.removeItem("username");
+
+    setRole(null);
+    setUserId(null);
+  };
+
+
   return (
     <Router>
+
       <Routes>
 
-        {/* HOME */}
+        {/* =====================================================
+            HOME
+        ===================================================== */}
+
         <Route
           path="/home"
           element={<Home />}
         />
 
-        {/* USER LOGIN */}
+
+        {/* =====================================================
+            USER LOGIN
+        ===================================================== */}
+
         <Route
           path="/"
           element={
@@ -54,7 +94,11 @@ function App() {
           }
         />
 
-        {/* REGISTER */}
+
+        {/* =====================================================
+            USER REGISTER
+        ===================================================== */}
+
         <Route
           path="/register"
           element={
@@ -69,7 +113,11 @@ function App() {
           }
         />
 
-        {/* USER DASHBOARD */}
+
+        {/* =====================================================
+            USER MY REPORTS
+        ===================================================== */}
+
         <Route
           path="/myreports"
           element={
@@ -88,7 +136,11 @@ function App() {
           }
         />
 
-        {/* UPLOAD REPORT */}
+
+        {/* =====================================================
+            USER UPLOAD
+        ===================================================== */}
+
         <Route
           path="/upload"
           element={
@@ -105,7 +157,61 @@ function App() {
           }
         />
 
-        {/* ADMIN LOGIN */}
+
+        {/* =====================================================
+            OPERATOR LOGIN
+        ===================================================== */}
+
+        <Route
+          path="/operator-login"
+          element={
+            role === "operator" ? (
+              <Navigate
+                to="/operator-dashboard"
+                replace
+              />
+            ) : (
+              <OperatorLogin
+                setRole={setRole}
+                setUserId={setUserId}
+              />
+            )
+          }
+        />
+
+
+        {/* =====================================================
+            OPERATOR DASHBOARD
+        =====================================================
+        
+        IMPORTANT:
+        Pass setRole and setUserId to OperatorDashboard.
+
+        This is what fixes the logout blinking problem.
+        */}
+
+        <Route
+          path="/operator-dashboard"
+          element={
+            role === "operator" ? (
+              <OperatorDashboard
+                setRole={setRole}
+                setUserId={setUserId}
+              />
+            ) : (
+              <Navigate
+                to="/operator-login"
+                replace
+              />
+            )
+          }
+        />
+
+
+        {/* =====================================================
+            ADMIN LOGIN
+        ===================================================== */}
+
         <Route
           path="/adminlogin"
           element={
@@ -115,7 +221,11 @@ function App() {
           }
         />
 
-        {/* ADMIN DASHBOARD */}
+
+        {/* =====================================================
+            ADMIN DASHBOARD
+        ===================================================== */}
+
         <Route
           path="/admin-dashboard"
           element={
@@ -130,7 +240,11 @@ function App() {
           }
         />
 
-        {/* UNKNOWN ROUTES */}
+
+        {/* =====================================================
+            UNKNOWN ROUTES
+        ===================================================== */}
+
         <Route
           path="*"
           element={
@@ -142,8 +256,10 @@ function App() {
         />
 
       </Routes>
+
     </Router>
   );
 }
+
 
 export default App;
