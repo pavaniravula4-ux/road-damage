@@ -7,10 +7,7 @@ import React, {
 import { useNavigate } from "react-router-dom";
 
 
-function OperatorDashboard({
-  setRole,
-  setUserId,
-}) {
+function OperatorDashboard() {
   const navigate = useNavigate();
 
   const API_URL =
@@ -41,8 +38,14 @@ function OperatorDashboard({
   const [updatingReportId, setUpdatingReportId] =
     useState(null);
 
+  const [verifyingReportId, setVerifyingReportId] =
+    useState(null);
+
   const [error, setError] =
     useState("");
+
+  const [loggingOut, setLoggingOut] =
+    useState(false);
 
 
   // ============================================================
@@ -55,6 +58,10 @@ function OperatorDashboard({
     "Operator";
 
 
+  const operatorToken =
+    sessionStorage.getItem("operator_token");
+
+
   const operatorId = Number(
     localStorage.getItem("operator_user_id") ||
     localStorage.getItem("user_id") ||
@@ -63,16 +70,10 @@ function OperatorDashboard({
 
 
   // ============================================================
-  // FRONTEND LOGOUT
-  //
-  // IMPORTANT:
-  // There is intentionally NO backend logout request here.
-  // This makes logout immediate.
+  // CLEAR OPERATOR SESSION
   // ============================================================
 
-  const handleLogout = () => {
-    // Remove authentication/session information immediately.
-
+  const clearOperatorSession = () => {
     sessionStorage.removeItem(
       "operator_token"
     );
@@ -95,89 +96,6 @@ function OperatorDashboard({
 
     localStorage.removeItem(
       "role"
-    );
-
-
-    // IMPORTANT:
-    // Update App.jsx React state immediately.
-    //
-    // Without this, App.jsx may still think the role
-    // is "operator" and redirect back to the dashboard.
-
-    if (typeof setRole === "function") {
-      setRole(null);
-    }
-
-    if (typeof setUserId === "function") {
-      setUserId(null);
-    }
-
-
-    // Close modal if open.
-
-    setSelectedReport(null);
-
-
-    // Navigate immediately.
-    //
-    // No fetch.
-    // No await.
-    // No refresh.
-    // No report loading.
-
-    navigate(
-      "/operator-login",
-      {
-        replace: true,
-      }
-    );
-  };
-
-
-  // ============================================================
-  // AUTH REDIRECT
-  // ============================================================
-
-  const redirectToLogin = () => {
-    sessionStorage.removeItem(
-      "operator_token"
-    );
-
-    localStorage.removeItem(
-      "operator_username"
-    );
-
-    localStorage.removeItem(
-      "operator_user_id"
-    );
-
-    localStorage.removeItem(
-      "username"
-    );
-
-    localStorage.removeItem(
-      "user_id"
-    );
-
-    localStorage.removeItem(
-      "role"
-    );
-
-
-    if (typeof setRole === "function") {
-      setRole(null);
-    }
-
-    if (typeof setUserId === "function") {
-      setUserId(null);
-    }
-
-
-    navigate(
-      "/operator-login",
-      {
-        replace: true,
-      }
     );
   };
 
@@ -187,19 +105,13 @@ function OperatorDashboard({
   // ============================================================
 
   const fetchReports = async () => {
-    const token =
-      sessionStorage.getItem(
-        "operator_token"
-      );
+    // Always check the actual session storage.
+    // Do not rely on React's loggingOut state because state updates are asynchronous.
+    const token = sessionStorage.getItem("operator_token");
 
-
-    // No token.
     if (!token) {
-      setLoading(false);
-      redirectToLogin();
       return;
     }
-
 
     setLoading(true);
     setError("");
@@ -230,15 +142,21 @@ function OperatorDashboard({
       }
 
 
-      // ========================================================
+      // ----------------------------------------------------------
       // AUTHENTICATION FAILURE
-      // ========================================================
+      // ----------------------------------------------------------
 
       if (
         response.status === 401 ||
         response.status === 403
       ) {
-        redirectToLogin();
+        // If logout already cleared the token, do nothing.
+        if (!sessionStorage.getItem("operator_token")) {
+          return;
+        }
+
+        clearOperatorSession();
+        navigate("/operator-login", { replace: true });
         return;
       }
 
@@ -259,7 +177,54 @@ function OperatorDashboard({
       }
 
 
-      setReports(data);
+      // A logout may have happened while the request was in flight.
+      if (!sessionStorage.getItem("operator_token")) {
+        return;
+      }
+
+      // Keep the saved after-repair image path across page refreshes.
+      // This does NOT store the image itself; it only remembers the
+      // server path returned after a successful repair verification.
+      let savedAfterImages = {};
+      try {
+        savedAfterImages = JSON.parse(
+          localStorage.getItem(
+            "roadguard_operator_after_images"
+          ) || "{}"
+        );
+      } catch {
+        savedAfterImages = {};
+      }
+
+      const reportsWithSavedAfterImages = data.map((item) => {
+        const serverAfterPath =
+          item.after_work_image_path ||
+          item.repair_image_path ||
+          item.after_image_path ||
+          item.after_image ||
+          "";
+
+        const savedAfterPath =
+          savedAfterImages[String(item.id)] ||
+          "";
+
+        return {
+          ...item,
+          ...(serverAfterPath
+            ? {
+                after_work_image_path:
+                  serverAfterPath,
+              }
+            : savedAfterPath
+              ? {
+                  after_work_image_path:
+                    savedAfterPath,
+                }
+              : {}),
+        };
+      });
+
+      setReports(reportsWithSavedAfterImages);
 
     } catch (err) {
       console.error(
@@ -267,11 +232,13 @@ function OperatorDashboard({
         err
       );
 
-      setError(
-        err.message ||
-        "Unable to connect to the server."
-      );
-
+      // Ignore errors from requests that finished after logout.
+      if (sessionStorage.getItem("operator_token")) {
+        setError(
+          err.message ||
+          "Unable to connect to the server."
+        );
+      }
     } finally {
       setLoading(false);
     }
@@ -283,10 +250,14 @@ function OperatorDashboard({
   // ============================================================
 
   useEffect(() => {
-    fetchReports();
+    const token = sessionStorage.getItem("operator_token");
 
-    // Intentionally run only once when dashboard mounts.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (!token) {
+      setLoading(false);
+      return;
+    }
+
+    fetchReports();
   }, []);
 
 
@@ -367,7 +338,7 @@ function OperatorDashboard({
 
 
   // ============================================================
-  // CHECK CURRENT OPERATOR
+  // CHECK WHETHER REPORT BELONGS TO CURRENT OPERATOR
   // ============================================================
 
   const isAssignedToCurrentOperator = (
@@ -387,20 +358,16 @@ function OperatorDashboard({
 
 
   // ============================================================
-  // ASSIGNED REPORTS
+  // REPORTS ASSIGNED TO THIS OPERATOR
   // ============================================================
 
   const assignedReports = useMemo(() => {
-    return reports.filter(
-      (report) =>
-        isAssignedToCurrentOperator(
-          report
-        )
-    );
-  }, [
-    reports,
-    operatorId,
-  ]);
+    // /api/operator/reports already returns the reports assigned
+    // to the authenticated operator. Do not filter them again
+    // on the frontend, because operator IDs may be stored under
+    // different keys and that can hide valid assigned reports.
+    return reports;
+  }, [reports]);
 
 
   // ============================================================
@@ -466,7 +433,8 @@ function OperatorDashboard({
         const status =
           normalizeStatus(
             report.status
-          ).toLowerCase();
+          )
+            .toLowerCase();
 
 
         const reportId =
@@ -476,6 +444,10 @@ function OperatorDashboard({
             .trim()
             .toLowerCase();
 
+
+        // --------------------------------------------------------
+        // SEARCH
+        // --------------------------------------------------------
 
         const matchesSearch =
           !searchText ||
@@ -499,11 +471,19 @@ function OperatorDashboard({
           );
 
 
+        // --------------------------------------------------------
+        // PRIORITY
+        // --------------------------------------------------------
+
         const matchesPriority =
           selectedPriority === "all" ||
           priority ===
             selectedPriority;
 
+
+        // --------------------------------------------------------
+        // STATUS
+        // --------------------------------------------------------
 
         const matchesStatus =
           selectedStatus === "all" ||
@@ -613,7 +593,15 @@ function OperatorDashboard({
 
 
     if (!token) {
-      redirectToLogin();
+      clearOperatorSession();
+
+      navigate(
+        "/operator-login",
+        {
+          replace: true,
+        }
+      );
+
       return;
     }
 
@@ -658,15 +646,23 @@ function OperatorDashboard({
       }
 
 
-      // ========================================================
+      // --------------------------------------------------------
       // AUTH FAILURE
-      // ========================================================
+      // --------------------------------------------------------
 
       if (
         response.status === 401 ||
         response.status === 403
       ) {
-        redirectToLogin();
+        clearOperatorSession();
+
+        navigate(
+          "/operator-login",
+          {
+            replace: true,
+          }
+        );
+
         return;
       }
 
@@ -680,16 +676,9 @@ function OperatorDashboard({
       }
 
 
-      // ========================================================
-      // UPDATE REPORT LOCALLY
-      //
-      // IMPORTANT:
-      // We DO NOT call fetchReports() here.
-      //
-      // This prevents the dashboard from showing
-      // "Loading assigned road reports..." after
-      // Start Work / Mark Completed.
-      // ========================================================
+      // --------------------------------------------------------
+      // UPDATE LOCAL REPORT LIST
+      // --------------------------------------------------------
 
       setReports(
         (previousReports) =>
@@ -719,20 +708,16 @@ function OperatorDashboard({
 
                 completed_at:
                   data.report?.completed_at ??
-                  (
-                    newStatus === "Completed"
-                      ? new Date().toISOString()
-                      : report.completed_at
-                  ),
+                  report.completed_at,
               };
             }
           )
       );
 
 
-      // ========================================================
-      // UPDATE OPEN MODAL
-      // ========================================================
+      // --------------------------------------------------------
+      // UPDATE MODAL REPORT
+      // --------------------------------------------------------
 
       setSelectedReport(
         (current) => {
@@ -761,14 +746,12 @@ function OperatorDashboard({
 
             completed_at:
               data.report?.completed_at ??
-              (
-                newStatus === "Completed"
-                  ? new Date().toISOString()
-                  : current.completed_at
-              ),
+              current.completed_at,
           };
         }
       );
+
+
 
     } catch (err) {
       console.error(
@@ -842,6 +825,185 @@ function OperatorDashboard({
       report.id,
       "Completed"
     );
+  };
+
+
+  // ============================================================
+  // BEFORE / AFTER REPAIR VERIFICATION
+  // ============================================================
+
+  const verifyRepair = async (report, event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+
+    if (!file) return;
+
+    const token = sessionStorage.getItem("operator_token");
+
+    if (!token) {
+      clearOperatorSession();
+      navigate("/operator-login", { replace: true });
+      return;
+    }
+
+    setVerifyingReportId(report.id);
+    setError("");
+
+    // Show the selected after-repair photo immediately while the
+    // backend saves and verifies it. This is only a frontend preview
+    // and does not change the user-upload flow.
+    const localAfterImageUrl = URL.createObjectURL(file);
+
+    setReports((previousReports) =>
+      previousReports.map((item) =>
+        Number(item.id) === Number(report.id)
+          ? {
+              ...item,
+              after_work_image_path: localAfterImageUrl,
+            }
+          : item
+      )
+    );
+
+    setSelectedReport((current) =>
+      current && Number(current.id) === Number(report.id)
+        ? {
+            ...current,
+            after_work_image_path: localAfterImageUrl,
+          }
+        : current
+    );
+
+    try {
+      const formData = new FormData();
+      formData.append("after_image", file);
+
+      const response = await fetch(
+        `${API_URL}/api/operator/reports/${report.id}/verify-repair`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+          body: formData,
+        }
+      );
+
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        clearOperatorSession();
+        navigate("/operator-login", { replace: true });
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          data.error ||
+          data.message ||
+          "Unable to verify the repair."
+        );
+      }
+
+      const updatedReport = data.report || data || {};
+
+      // Keep the operator after-repair image completely independent.
+      // The backend may return the saved image under any of these names.
+      const afterImagePath =
+        updatedReport.after_work_image_path ||
+        updatedReport.repair_image_path ||
+        updatedReport.after_image_path ||
+        updatedReport.after_image ||
+        "";
+
+      const normalizedReport = {
+        ...updatedReport,
+        ...(afterImagePath
+          ? { after_work_image_path: afterImagePath }
+          : {}),
+      };
+
+      // Persist only the server-side image path. Never persist a blob URL.
+      if (afterImagePath && !afterImagePath.startsWith("blob:")) {
+        try {
+          const savedAfterImages = JSON.parse(
+            localStorage.getItem(
+              "roadguard_operator_after_images"
+            ) || "{}"
+          );
+
+          savedAfterImages[String(report.id)] =
+            afterImagePath;
+
+          localStorage.setItem(
+            "roadguard_operator_after_images",
+            JSON.stringify(savedAfterImages)
+          );
+        } catch (storageError) {
+          console.warn(
+            "Unable to save after-repair image path:",
+            storageError
+          );
+        }
+
+        URL.revokeObjectURL(localAfterImageUrl);
+      }
+
+      setReports((previousReports) =>
+        previousReports.map((item) =>
+          Number(item.id) === Number(report.id)
+            ? {
+                ...item,
+                ...normalizedReport,
+                ...(afterImagePath
+                  ? { after_work_image_path: afterImagePath }
+                  : {}),
+              }
+            : item
+        )
+      );
+
+      setSelectedReport((current) => {
+        if (!current || Number(current.id) !== Number(report.id)) {
+          return current;
+        }
+
+        return {
+          ...current,
+          ...normalizedReport,
+          ...(afterImagePath
+            ? { after_work_image_path: afterImagePath }
+            : {}),
+        };
+      });
+    } catch (err) {
+      URL.revokeObjectURL(localAfterImageUrl);
+      console.error("Repair verification error:", err);
+      setError(
+        err.message ||
+        "Unable to verify the repair."
+      );
+    } finally {
+      setVerifyingReportId(null);
+    }
+  };
+
+  // ============================================================
+  // LOGOUT
+  // ============================================================
+
+  const handleLogout = () => {
+    // Logout must be a pure navigation action.
+    // Do not change dashboard state, refresh reports, or call any API.
+    clearOperatorSession();
+    navigate("/operator-login", {
+      replace: true,
+    });
   };
 
 
@@ -1044,6 +1206,9 @@ function OperatorDashboard({
       ) ||
       path.startsWith(
         "https://"
+      ) ||
+      path.startsWith(
+        "blob:"
       )
     ) {
       return path;
@@ -1064,6 +1229,199 @@ function OperatorDashboard({
   // ============================================================
   // REPORT ACTION BUTTONS
   // ============================================================
+
+  const renderRepairVerification = (report) => {
+    const afterImagePath =
+      report.after_work_image_path ||
+      report.repair_image_path ||
+      report.after_image_path ||
+      report.after_image ||
+      "";
+
+    if (!report.verification_status && !afterImagePath) {
+      return null;
+    }
+
+    const status = report.verification_status || "Needs Review";
+    const statusClass =
+      status === "Verified"
+        ? "operator-verification-verified"
+        : status === "Needs Repair"
+          ? "operator-verification-needs-repair"
+          : "operator-verification-review";
+
+    const resultText = String(
+      report.verification_result ||
+      report.verification_analysis ||
+      ""
+    );
+
+    const originalMatch = resultText.match(
+      /^Original Damage:\s*(.+)$/im
+    );
+    const repairMatch = resultText.match(
+      /^Repair Detected:\s*(Yes|No|Unclear)\s*$/im
+    );
+    const explanationMatch = resultText.match(
+      /^Explanation:\s*(.+)$/im
+    );
+
+    return (
+      <div
+        style={{
+          marginTop: "18px",
+          padding: "16px",
+          border: "1px solid #dbe4f0",
+          borderRadius: "14px",
+          background: "#f8fbff",
+        }}
+      >
+        <h4
+          style={{
+            margin: "0 0 12px",
+            fontSize: "15px",
+            color: "#10213b",
+          }}
+        >
+          🤖 Gemini Repair Verification
+        </h4>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+            gap: "12px",
+          }}
+        >
+          <div>
+            <p
+              style={{
+                margin: "0 0 6px",
+                fontSize: "12px",
+                fontWeight: 700,
+              }}
+            >
+              BEFORE
+            </p>
+
+            {report.image_path ? (
+              <img
+                src={getImageUrl(report.image_path)}
+                alt="Original road damage"
+                style={{
+                  width: "100%",
+                  height: "150px",
+                  objectFit: "cover",
+                  borderRadius: "10px",
+                  border: "1px solid #dbe4f0",
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  height: "150px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderRadius: "10px",
+                  border: "1px dashed #b9c7d8",
+                  color: "#718096",
+                }}
+              >
+                No before image
+              </div>
+            )}
+          </div>
+
+          <div>
+            <p
+              style={{
+                margin: "0 0 6px",
+                fontSize: "12px",
+                fontWeight: 700,
+              }}
+            >
+              AFTER
+            </p>
+
+            {afterImagePath ? (
+              <img
+                src={getImageUrl(afterImagePath)}
+                alt="After repair"
+                style={{
+                  width: "100%",
+                  height: "150px",
+                  objectFit: "cover",
+                  borderRadius: "10px",
+                  border: "1px solid #dbe4f0",
+                }}
+                onError={(event) => {
+                  console.error(
+                    "After repair image failed to load:",
+                    getImageUrl(afterImagePath)
+                  );
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  height: "150px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderRadius: "10px",
+                  border: "1px dashed #b9c7d8",
+                  color: "#718096",
+                }}
+              >
+                No after image
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div style={{ marginTop: "12px", lineHeight: 1.6 }}>
+          <div>
+            <strong>Original Damage:</strong>{" "}
+            {originalMatch?.[1] ||
+              report.damage_type ||
+              "Not determinable"}
+          </div>
+
+          <div>
+            <strong>Repair Detected:</strong>{" "}
+            {repairMatch?.[1] || "Unclear"}
+          </div>
+
+          <div>
+            <strong>Confidence:</strong>{" "}
+            {report.verification_confidence ?? 0}%
+          </div>
+
+          <div style={{ marginTop: "6px" }}>
+            <strong>Status:</strong>{" "}
+            <span className={statusClass}>
+              {status === "Verified"
+                ? "VERIFIED ✅"
+                : status}
+            </span>
+          </div>
+
+          <p
+            style={{
+              margin: "8px 0 0",
+              color: "#5d6b7e",
+              fontSize: "13px",
+            }}
+          >
+            {explanationMatch?.[1] ||
+              "Gemini verification completed."}
+          </p>
+        </div>
+      </div>
+    );
+  };
+
 
   const renderReportActions = (
     report
@@ -1088,22 +1446,24 @@ function OperatorDashboard({
         className="operator-report-actions"
         style={{
           display: "flex",
+          flexDirection: "row",
           flexWrap: "wrap",
-          alignItems: "center",
-          gap: "14px",
+          alignItems: "stretch",
+          gap: "12px",
           marginTop: "18px",
+          width: "100%",
         }}
       >
-
-        {/* VIEW DETAILS */}
 
         <button
           type="button"
           className="operator-view-button"
           style={{
-            flex: "1 1 160px",
+            flex: "1 1 150px",
             minWidth: "160px",
+            minHeight: "44px",
             whiteSpace: "nowrap",
+            margin: 0,
           }}
           onClick={() =>
             setSelectedReport(
@@ -1115,20 +1475,18 @@ function OperatorDashboard({
         </button>
 
 
-        {/* START WORK */}
-
         {status === "Assigned" && (
           <button
             type="button"
             className="operator-start-button"
             style={{
-              flex: "1 1 160px",
+              flex: "1 1 150px",
               minWidth: "160px",
+              minHeight: "44px",
               whiteSpace: "nowrap",
+              margin: 0,
             }}
-            disabled={
-              isUpdating
-            }
+            disabled={isUpdating}
             onClick={() =>
               handleStartWork(
                 report
@@ -1142,20 +1500,18 @@ function OperatorDashboard({
         )}
 
 
-        {/* MARK COMPLETED */}
-
         {status === "In Progress" && (
           <button
             type="button"
             className="operator-complete-button"
             style={{
-              flex: "1 1 160px",
+              flex: "1 1 150px",
               minWidth: "160px",
+              minHeight: "44px",
               whiteSpace: "nowrap",
+              margin: 0,
             }}
-            disabled={
-              isUpdating
-            }
+            disabled={isUpdating}
             onClick={() =>
               handleCompleteWork(
                 report
@@ -1169,15 +1525,40 @@ function OperatorDashboard({
         )}
 
 
-        {/* COMPLETED */}
+        <label
+          style={{
+            flex: "1 1 210px",
+            minWidth: "210px",
+            minHeight: "44px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            borderRadius: "10px",
+            border: "1px solid #dbe4f0",
+            background: "#ffffff",
+            color: "#1459b8",
+            fontWeight: 700,
+            cursor: verifyingReportId === report.id ? "not-allowed" : "pointer",
+            opacity: verifyingReportId === report.id ? 0.65 : 1,
+          }}
+        >
+          {verifyingReportId === report.id
+            ? "Verifying Repair..."
+            : report.verification_status
+              ? "Upload New After Photo"
+              : "Upload After Photo & Verify"}
+          <input
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            disabled={verifyingReportId === report.id}
+            onChange={(event) => verifyRepair(report, event)}
+            style={{ display: "none" }}
+          />
+        </label>
 
         {status === "Completed" && (
           <span
             className="operator-completed-label"
-            style={{
-              minWidth: "160px",
-              textAlign: "center",
-            }}
           >
             ✓ Completed
           </span>
@@ -1264,9 +1645,7 @@ function OperatorDashboard({
           <button
             type="button"
             className="operator-logout-button"
-            onClick={
-              handleLogout
-            }
+            onClick={handleLogout}
           >
             Logout
           </button>
@@ -1313,7 +1692,9 @@ function OperatorDashboard({
               fetchReports
             }
             disabled={
-              loading
+              loading ||
+              loggingOut ||
+              !sessionStorage.getItem("operator_token")
             }
           >
             {loading
@@ -1668,7 +2049,7 @@ function OperatorDashboard({
             </div>
 
 
-            {/* PRIORITY FILTER */}
+            {/* PRIORITY */}
 
             <select
               className="operator-priority-filter"
@@ -1705,7 +2086,7 @@ function OperatorDashboard({
             </select>
 
 
-            {/* STATUS FILTER */}
+            {/* STATUS */}
 
             <select
               className="operator-priority-filter"
@@ -1746,7 +2127,8 @@ function OperatorDashboard({
             LOADING
         ====================================================== */}
 
-        {loading && (
+        {loading &&
+          sessionStorage.getItem("operator_token") && (
           <div
             className="operator-loading"
           >
@@ -1770,7 +2152,6 @@ function OperatorDashboard({
         {!loading &&
           !error &&
           assignedReports.length === 0 && (
-
             <div
               className="operator-empty"
             >
@@ -1790,7 +2171,6 @@ function OperatorDashboard({
               </p>
 
             </div>
-
           )}
 
 
@@ -1801,7 +2181,6 @@ function OperatorDashboard({
         {!loading &&
           assignedReports.length > 0 &&
           filteredReports.length === 0 && (
-
             <div
               className="operator-empty"
             >
@@ -1820,7 +2199,6 @@ function OperatorDashboard({
               </p>
 
             </div>
-
           )}
 
 
@@ -1860,11 +2238,10 @@ function OperatorDashboard({
 
 
                   return (
+
                     <article
                       className="operator-report-card"
-                      key={
-                        report.id
-                      }
+                      key={report.id}
                     >
 
                       {/* =========================================
@@ -1900,7 +2277,7 @@ function OperatorDashboard({
                         )}
 
 
-                        {/* PRIORITY */}
+                        {/* PRIORITY BADGE */}
 
                         <span
                           className={
@@ -1913,7 +2290,7 @@ function OperatorDashboard({
                         </span>
 
 
-                        {/* STATUS */}
+                        {/* STATUS BADGE */}
 
                         <span
                           className={
@@ -1986,8 +2363,6 @@ function OperatorDashboard({
                           className="operator-report-details"
                         >
 
-                          {/* LOCATION */}
-
                           <div
                             className="operator-detail-item"
                           >
@@ -2011,8 +2386,6 @@ function OperatorDashboard({
 
                           </div>
 
-
-                          {/* SEVERITY */}
 
                           <div
                             className="operator-detail-item"
@@ -2044,8 +2417,6 @@ function OperatorDashboard({
                           </div>
 
 
-                          {/* STATUS */}
-
                           <div
                             className="operator-detail-item"
                           >
@@ -2068,8 +2439,6 @@ function OperatorDashboard({
 
                           </div>
 
-
-                          {/* REPORTED */}
 
                           <div
                             className="operator-detail-item"
@@ -2146,6 +2515,8 @@ function OperatorDashboard({
 
                         </div>
 
+                        {renderRepairVerification(report)}
+
 
                         {/* =======================================
                             ACTIONS
@@ -2163,7 +2534,6 @@ function OperatorDashboard({
               )}
 
             </section>
-
           )}
 
       </main>
@@ -2622,7 +2992,7 @@ function OperatorDashboard({
                 flexWrap: "wrap",
                 alignItems: "center",
                 justifyContent: "flex-end",
-                gap: "14px",
+                gap: "12px",
               }}
             >
 
@@ -2652,6 +3022,7 @@ function OperatorDashboard({
                     )
                   }
                 >
+
                   {Number(
                     updatingReportId
                   ) === Number(
@@ -2659,6 +3030,7 @@ function OperatorDashboard({
                   )
                     ? "Starting..."
                     : "Start Work"}
+
                 </button>
 
               )}
@@ -2690,6 +3062,7 @@ function OperatorDashboard({
                     )
                   }
                 >
+
                   {Number(
                     updatingReportId
                   ) === Number(
@@ -2697,6 +3070,7 @@ function OperatorDashboard({
                   )
                     ? "Completing..."
                     : "Mark Completed"}
+
                 </button>
 
               )}

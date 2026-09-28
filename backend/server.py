@@ -40,7 +40,7 @@ app = Flask(__name__)
 CORS(
     app,
     resources={
-        r"/*": {
+        r"/api/*": {
             "origins": [
                 "http://localhost:5173",
                 "http://127.0.0.1:5173",
@@ -57,7 +57,14 @@ CORS(
                 "DELETE",
                 "OPTIONS",
             ],
-        }
+        },
+        r"/uploads/*": {
+            "origins": [
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+            ],
+            "methods": ["GET", "OPTIONS"],
+        },
     },
     supports_credentials=True,
 )
@@ -188,6 +195,35 @@ class Report(db.Model):
         nullable=True,
     )
 
+    # ========================================================
+    # AFTER-WORK GEMINI VERIFICATION
+    # ========================================================
+
+    after_work_image_path = db.Column(
+        db.String(255),
+        nullable=True,
+    )
+
+    verification_analysis = db.Column(
+        db.Text,
+        nullable=True,
+    )
+
+    verification_status = db.Column(
+        db.String(50),
+        nullable=True,
+    )
+
+    verification_confidence = db.Column(
+        db.Float,
+        nullable=True,
+    )
+
+    verified_at = db.Column(
+        db.DateTime,
+        nullable=True,
+    )
+
     created_at = db.Column(
         db.DateTime,
         default=lambda: datetime.now(INDIA_TIMEZONE),
@@ -228,6 +264,26 @@ with app.app_context():
             "completed_at": (
                 "ALTER TABLE report "
                 "ADD COLUMN completed_at DATETIME"
+            ),
+            "after_work_image_path": (
+                "ALTER TABLE report "
+                "ADD COLUMN after_work_image_path VARCHAR(255)"
+            ),
+            "verification_analysis": (
+                "ALTER TABLE report "
+                "ADD COLUMN verification_analysis TEXT"
+            ),
+            "verification_status": (
+                "ALTER TABLE report "
+                "ADD COLUMN verification_status VARCHAR(50)"
+            ),
+            "verification_confidence": (
+                "ALTER TABLE report "
+                "ADD COLUMN verification_confidence FLOAT"
+            ),
+            "verified_at": (
+                "ALTER TABLE report "
+                "ADD COLUMN verified_at DATETIME"
             ),
         }
 
@@ -456,6 +512,31 @@ os.makedirs(
 
 
 # ============================================================
+# AFTER-WORK VERIFICATION UPLOADS
+# ============================================================
+
+VERIFICATION_UPLOAD_FOLDER = os.path.join(
+    app.root_path,
+    "verification_uploads",
+)
+
+os.makedirs(
+    VERIFICATION_UPLOAD_FOLDER,
+    exist_ok=True,
+)
+
+
+@app.route(
+    "/verification_uploads/<path:filename>"
+)
+def verification_uploaded_file(filename):
+    return send_from_directory(
+        VERIFICATION_UPLOAD_FOLDER,
+        filename,
+    )
+
+
+# ============================================================
 # STATIC UPLOADED FILES
 # ============================================================
 
@@ -563,6 +644,125 @@ def _run_gemini_with_retry(
                 time.sleep(delay)
 
     raise last_error
+
+
+def validate_road_damage_image(filepath):
+    """Validate that a user-uploaded image is actually a damaged road.
+
+    This function is used ONLY by the normal user report-upload flow.
+    It is intentionally separate from operator after-repair verification.
+    """
+    if client is None:
+        print(
+            "Road image validation unavailable: "
+            "GEMINI_API_KEY is not configured."
+        )
+        return None
+
+    if not os.path.exists(filepath):
+        print("Road image validation failed: image file not found.")
+        return None
+
+    validation_prompt = """
+You are the STRICT image gatekeeper for RoadGuard AI.
+
+Your ONLY task is to decide whether this uploaded image is a valid
+road-damage report image.
+
+Return VALID only when BOTH conditions are clearly visible:
+1. A road, street, roadway, pavement, or road surface is visible.
+2. Actual damage to that road surface is visible.
+
+Examples of valid road damage:
+- pothole
+- road crack
+- broken or damaged pavement
+- surface deterioration
+- damaged road edge
+- water-related road damage
+- another clearly visible road defect
+
+Return INVALID for:
+- houses or buildings
+- rooms or indoor scenes
+- people or portraits
+- animals
+- food
+- plants
+- documents or screenshots
+- random objects
+- vehicle-only images
+- normal/undamaged roads
+- scenery without visible road damage
+- images where the road or damage cannot be clearly determined
+
+A house, person, animal, or vehicle near a road does NOT make the image valid.
+Do not use the filename. Do not guess the user's intention.
+If the evidence is unclear, return INVALID.
+
+Return ONLY one word:
+VALID
+or
+INVALID
+"""
+
+    try:
+        uploaded_file = client.files.upload(
+            file=filepath
+        )
+
+        try:
+            result = _run_gemini_with_retry(
+                GEMINI_MODEL,
+                uploaded_file,
+                validation_prompt,
+            )
+        except Exception as primary_error:
+            print(
+                "Primary Gemini road validation failed:",
+                str(primary_error),
+            )
+
+            if (
+                GEMINI_FALLBACK_MODEL
+                and GEMINI_FALLBACK_MODEL != GEMINI_MODEL
+                and _is_retryable_gemini_error(primary_error)
+            ):
+                try:
+                    result = _run_gemini_with_retry(
+                        GEMINI_FALLBACK_MODEL,
+                        uploaded_file,
+                        validation_prompt,
+                    )
+                except Exception as fallback_error:
+                    print(
+                        "Fallback Gemini road validation failed:",
+                        str(fallback_error),
+                    )
+                    return None
+            else:
+                return None
+
+        result = str(result or "").strip().upper()
+
+        if result == "VALID":
+            return True
+
+        if result == "INVALID":
+            return False
+
+        print(
+            "Unexpected road validation response:",
+            result,
+        )
+        return False
+
+    except Exception as e:
+        print(
+            "Road image validation error:",
+            str(e),
+        )
+        return None
 
 
 def analyze_image_with_gemini(filepath):
@@ -706,6 +906,227 @@ Do not add headings, markdown, or extra lines.
             "AI analysis failed: "
             + str(e)
         )
+
+
+# ============================================================
+# BEFORE / AFTER REPAIR VERIFICATION WITH GEMINI
+# ============================================================
+
+def verify_repair_with_gemini(
+    before_filepath,
+    after_filepath,
+):
+    if client is None:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not configured."
+        )
+
+    if not os.path.isfile(before_filepath):
+        raise FileNotFoundError(
+            "Original report image file was not found."
+        )
+
+    if not os.path.isfile(after_filepath):
+        raise FileNotFoundError(
+            "After-work image file was not found."
+        )
+
+    before_file = client.files.upload(
+        file=before_filepath
+    )
+
+    after_file = client.files.upload(
+        file=after_filepath
+    )
+
+    prompt = """
+You are RoadGuard AI, a road repair verification system.
+
+You will receive TWO images of the same road location:
+1. BEFORE image — the original road-damage report.
+2. AFTER image — the photo submitted after repair work.
+
+Compare ONLY visible evidence in the two images.
+
+Determine whether the visible road damage appears:
+- Completed: the reported damage appears repaired.
+- Partially Completed: some repair is visible, but damage remains.
+- Not Completed: the reported damage remains substantially visible.
+- Unclear: the images do not provide enough comparable evidence.
+
+Do not assume work was completed merely because the second image exists.
+Do not infer hidden repairs.
+Do not use location, weather, traffic, or outside information.
+
+Confidence must be a number from 0 to 100.
+
+Evidence should briefly explain the visible before/after difference.
+
+Recommendation should briefly state the next practical action.
+
+Return ONLY these fields, one per line:
+
+Status: Completed | Partially Completed | Not Completed | Unclear
+Confidence: 0-100
+Evidence: ...
+Recommendation: ...
+"""
+
+    total_attempts = GEMINI_MAX_RETRIES + 1
+    last_error = None
+
+    models_to_try = [GEMINI_MODEL]
+
+    if (
+        GEMINI_FALLBACK_MODEL
+        and GEMINI_FALLBACK_MODEL != GEMINI_MODEL
+    ):
+        models_to_try.append(
+            GEMINI_FALLBACK_MODEL
+        )
+
+    for model in models_to_try:
+        for attempt in range(total_attempts):
+            try:
+                print(
+                    "Gemini repair verification "
+                    f"attempt {attempt + 1}/{total_attempts} "
+                    f"using {model}..."
+                )
+
+                response = client.models.generate_content(
+                    model=model,
+                    contents=[
+                        before_file,
+                        after_file,
+                        prompt,
+                    ],
+                    config=types.GenerateContentConfig(
+                        temperature=0,
+                    ),
+                )
+
+                if response and response.text:
+                    print(
+                        "Gemini repair verification "
+                        f"succeeded using {model}."
+                    )
+                    return response.text.strip()
+
+                last_error = RuntimeError(
+                    "Gemini returned an empty "
+                    "repair verification response."
+                )
+
+            except Exception as exc:
+                last_error = exc
+
+                print(
+                    "Gemini repair verification error "
+                    f"using {model} "
+                    f"(attempt {attempt + 1}/{total_attempts}): "
+                    f"{exc}"
+                )
+
+                if not _is_retryable_gemini_error(exc):
+                    raise
+
+                if attempt < total_attempts - 1:
+                    delay = (
+                        GEMINI_RETRY_DELAY
+                        * (2 ** attempt)
+                    )
+
+                    print(
+                        "Temporary Gemini repair "
+                        f"verification failure. "
+                        f"Retrying in {delay:.1f} seconds..."
+                    )
+
+                    time.sleep(delay)
+
+    raise last_error or RuntimeError(
+        "Unable to verify the repair with Gemini."
+    )
+
+
+def parse_repair_verification(text):
+    text = str(text or "").strip()
+
+    status = "Unclear"
+    confidence = None
+    evidence = None
+    recommendation = None
+
+    status_match = re.search(
+        r"^Status:\s*(.+)$",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+
+    if status_match:
+        raw_status = status_match.group(1).strip().lower()
+
+        if raw_status == "completed":
+            status = "Completed"
+        elif raw_status in {
+            "partially completed",
+            "partial",
+            "partially_complete",
+        }:
+            status = "Partially Completed"
+        elif raw_status in {
+            "not completed",
+            "not_complete",
+            "incomplete",
+        }:
+            status = "Not Completed"
+        else:
+            status = "Unclear"
+
+    confidence_match = re.search(
+        r"^Confidence:\s*([0-9]+(?:\.[0-9]+)?)",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+
+    if confidence_match:
+        try:
+            confidence = float(
+                confidence_match.group(1)
+            )
+            confidence = min(
+                max(confidence, 0.0),
+                100.0,
+            )
+        except ValueError:
+            confidence = None
+
+    evidence_match = re.search(
+        r"^Evidence:\s*(.+)$",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+
+    if evidence_match:
+        evidence = evidence_match.group(1).strip()
+
+    recommendation_match = re.search(
+        r"^Recommendation:\s*(.+)$",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+
+    if recommendation_match:
+        recommendation = recommendation_match.group(1).strip()
+
+    return {
+        "status": status,
+        "confidence": confidence,
+        "evidence": evidence,
+        "recommendation": recommendation,
+        "raw_analysis": text,
+    }
 
 
 # ============================================================
@@ -947,6 +1368,23 @@ def serialize_report(report):
         ),
         "completed_at": serialize_created_at(
             report.completed_at
+        ),
+
+        # After-work Gemini verification
+        "after_work_image_path": (
+            report.after_work_image_path
+        ),
+        "verification_analysis": (
+            report.verification_analysis
+        ),
+        "verification_status": (
+            report.verification_status
+        ),
+        "verification_confidence": (
+            report.verification_confidence
+        ),
+        "verified_at": serialize_created_at(
+            report.verified_at
         ),
 
         "created_at": serialize_created_at(
@@ -1922,6 +2360,244 @@ def get_operator_reports():
 
 
 # ============================================================
+# OPERATOR - VERIFY REPAIR WITH BEFORE/AFTER IMAGES
+# ============================================================
+
+
+@app.route(
+    "/api/operator/reports/<int:report_id>/verify-repair",
+    methods=["POST"],
+)
+def verify_operator_repair(report_id):
+    if not require_operator_token():
+        return jsonify({
+            "error": "Operator authentication required.",
+        }), 401
+
+    operator_id = get_current_operator_id()
+
+    if not operator_id:
+        return jsonify({
+            "error": "Invalid operator session.",
+        }), 401
+
+    report = db.session.get(
+        Report,
+        report_id,
+    )
+
+    if not report:
+        return jsonify({
+            "error": "Report not found.",
+        }), 404
+
+    if report.assigned_operator_id != operator_id:
+        return jsonify({
+            "error": "This report is not assigned to you.",
+        }), 403
+
+    # ========================================================
+    # AFTER-REPAIR IMAGE UPLOAD
+    # ========================================================
+
+    after_image = request.files.get(
+        "after_image"
+    )
+
+    if not after_image or not after_image.filename:
+        return jsonify({
+            "error": "After-repair image is required.",
+        }), 400
+
+    extension = os.path.splitext(
+        after_image.filename
+    )[1].lower()
+
+    allowed_extensions = {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+    }
+
+    if extension not in allowed_extensions:
+        return jsonify({
+            "error": (
+                "Only JPG, JPEG, PNG and WEBP "
+                "images are supported."
+            ),
+        }), 400
+
+    # Make sure the verification upload directory exists.
+    os.makedirs(
+        VERIFICATION_UPLOAD_FOLDER,
+        exist_ok=True,
+    )
+
+    filename = (
+        str(uuid.uuid4())
+        + extension
+    )
+
+    after_filepath = os.path.join(
+        VERIFICATION_UPLOAD_FOLDER,
+        filename,
+    )
+
+    try:
+        # ----------------------------------------------------
+        # STEP 1: SAVE AFTER-REPAIR IMAGE FIRST
+        # ----------------------------------------------------
+        after_image.save(
+            after_filepath
+        )
+
+        if not os.path.isfile(
+            after_filepath
+        ):
+            raise RuntimeError(
+                "After-repair image could not be saved."
+            )
+
+        # Save the image path immediately so the uploaded
+        # image is not lost if Gemini verification fails.
+        report.after_work_image_path = (
+            f"/verification_uploads/{filename}"
+        )
+
+        db.session.commit()
+
+        # ----------------------------------------------------
+        # STEP 2: FIND ORIGINAL BEFORE IMAGE
+        # ----------------------------------------------------
+        original_filename = os.path.basename(
+            report.image_path or ""
+        )
+
+        original_filepath = os.path.join(
+            UPLOAD_FOLDER,
+            original_filename,
+        )
+
+        if (
+            not original_filename
+            or not os.path.isfile(
+                original_filepath
+            )
+        ):
+            return jsonify({
+                "message": (
+                    "After-repair image uploaded successfully."
+                ),
+                "warning": (
+                    "Original before-repair image "
+                    "was not found, so verification "
+                    "could not be completed."
+                ),
+                "report": serialize_report(report),
+            }), 200
+
+        # ----------------------------------------------------
+        # STEP 3: VERIFY BEFORE + AFTER WITH GEMINI
+        # ----------------------------------------------------
+        verification_text = (
+            verify_repair_with_gemini(
+                original_filepath,
+                after_filepath,
+            )
+        )
+
+        parsed = parse_repair_verification(
+            verification_text
+        )
+
+        report.verification_analysis = (
+            verification_text
+        )
+
+        report.verification_status = (
+            parsed["status"]
+        )
+
+        report.verification_confidence = (
+            parsed["confidence"]
+        )
+
+        report.verified_at = datetime.now(
+            INDIA_TIMEZONE
+        )
+
+        db.session.commit()
+
+        return jsonify({
+            "message": (
+                "After-repair image uploaded "
+                "and repair verification completed."
+            ),
+            "report": serialize_report(report),
+            "verification": parsed,
+        }), 200
+
+    except Exception as e:
+        # IMPORTANT:
+        # Do NOT delete the after-repair image here.
+        # The image has already been successfully uploaded
+        # and its path has been stored in the database.
+        db.session.rollback()
+
+        # Restore the image path after rollback and keep it.
+        try:
+            report = db.session.get(
+                Report,
+                report_id,
+            )
+
+            if report:
+                report.after_work_image_path = (
+                    f"/verification_uploads/{filename}"
+                )
+
+                db.session.commit()
+        except Exception as save_error:
+            db.session.rollback()
+
+            print(
+                "Could not preserve after-repair "
+                f"image path: {save_error}"
+            )
+
+        print(
+            "Repair verification error:",
+            str(e),
+        )
+
+        # The upload itself succeeded, so return the
+        # uploaded image even if Gemini verification failed.
+        current_report = db.session.get(
+            Report,
+            report_id,
+        )
+
+        return jsonify({
+            "message": (
+                "After-repair image uploaded successfully, "
+                "but AI verification could not be completed."
+            ),
+            "warning": str(e),
+            "report": (
+                serialize_report(current_report)
+                if current_report
+                else {
+                    "id": report_id,
+                    "after_work_image_path": (
+                        f"/verification_uploads/{filename}"
+                    ),
+                }
+            ),
+        }), 200
+
+
+# ============================================================
 # OPERATOR - UPDATE REPORT STATUS
 # ============================================================
 
@@ -2138,6 +2814,46 @@ def upload_report():
     image_path = (
         f"/uploads/{filename}"
     )
+
+    # ========================================================
+    # USER IMAGE VALIDATION ONLY
+    # ========================================================
+    # This runs before Report(...) is created. It is deliberately
+    # separate from the operator after-repair verification flow.
+    validation_result = validate_road_damage_image(filepath)
+
+    if validation_result is False:
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+        except Exception as cleanup_error:
+            print(
+                "Invalid-image cleanup warning:",
+                str(cleanup_error),
+            )
+
+        return jsonify({
+            "valid": False,
+            "error": "Please upload road damaged images only.",
+        }), 400
+
+    if validation_result is None:
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+        except Exception as cleanup_error:
+            print(
+                "Validation-failure cleanup warning:",
+                str(cleanup_error),
+            )
+
+        return jsonify({
+            "valid": False,
+            "error": (
+                "Unable to validate the image right now. "
+                "Please try again."
+            ),
+        }), 503
 
     upload_time = datetime.now(
         INDIA_TIMEZONE

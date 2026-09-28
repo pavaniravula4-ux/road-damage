@@ -36,6 +36,7 @@ function UploadReports({ userId }) {
     }
 
     setError("");
+    setSuccess("");
     setImage(file);
 
     const imageUrl = URL.createObjectURL(file);
@@ -50,54 +51,96 @@ function UploadReports({ userId }) {
   const handleGetLocation = () => {
 
     setError("");
+    setSuccess("");
     setGettingLocation(true);
 
     if (!navigator.geolocation) {
       setError(
-        "Geolocation is not supported by your browser."
+        "Your browser does not support location services."
       );
 
       setGettingLocation(false);
       return;
     }
 
-    navigator.geolocation.getCurrentPosition(
+    const handleLocationSuccess = (position) => {
 
-      (position) => {
+      const latitude =
+        position.coords.latitude;
 
-        const latitude =
-          position.coords.latitude;
+      const longitude =
+        position.coords.longitude;
 
-        const longitude =
-          position.coords.longitude;
+      setLocation(
+        `${latitude}, ${longitude}`
+      );
 
-        setLocation(
-          `${latitude}, ${longitude}`
-        );
+      setError("");
+      setGettingLocation(false);
+    };
 
-        setGettingLocation(false);
-      },
+    const handleLocationError = (error) => {
 
-      (error) => {
+      console.error(
+        "Location error:",
+        error
+      );
 
-        console.error(
-          "Location error:",
-          error
-        );
+      setGettingLocation(false);
 
+      if (error.code === 1) {
         setError(
-          "Unable to get your location. Please enter it manually."
+          "Location permission was denied. Please allow location access for this site and try again."
+        );
+      } else if (error.code === 2) {
+        setError(
+          "Your location could not be determined. Please make sure Location Services are enabled and try again."
+        );
+      } else if (error.code === 3) {
+        setError(
+          "Location request timed out. Please try the Use My Location button again."
+        );
+      } else {
+        setError(
+          "Unable to get your current location. Please try again."
+        );
+      }
+    };
+
+    // First use a normal-accuracy request. This is usually faster and
+    // works more reliably in browsers than forcing GPS/high accuracy.
+    navigator.geolocation.getCurrentPosition(
+      handleLocationSuccess,
+      (firstError) => {
+
+        console.warn(
+          "Normal location request failed. Trying high accuracy:",
+          firstError
         );
 
-        setGettingLocation(false);
+        // If permission was denied, asking again cannot help.
+        if (firstError.code === 1) {
+          handleLocationError(firstError);
+          return;
+        }
+
+        // Retry once with high accuracy for laptops/desktops where
+        // the first location provider could not determine the position.
+        navigator.geolocation.getCurrentPosition(
+          handleLocationSuccess,
+          handleLocationError,
+          {
+            enableHighAccuracy: true,
+            timeout: 20000,
+            maximumAge: 0,
+          }
+        );
       },
-
       {
-        enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 0,
+        enableHighAccuracy: false,
+        timeout: 15000,
+        maximumAge: 60000,
       }
-
     );
   };
 
@@ -180,6 +223,23 @@ function UploadReports({ userId }) {
 
 
       if (!response.ok) {
+
+        // Backend rejects non-road images with this exact message.
+        // Show it directly to the user and DO NOT navigate to My Reports.
+        if (
+          data?.error ===
+          "Please upload road damaged images only."
+        ) {
+          setError("");
+          setSuccess("");
+
+          window.alert(
+            "Please upload road damaged images only."
+          );
+
+          setLoading(false);
+          return;
+        }
 
         throw new Error(
           data.message ||
@@ -552,3 +612,9 @@ function UploadReports({ userId }) {
 }
 
 export default UploadReports;
+
+
+
+
+
+

@@ -101,3 +101,7 @@ desktop.ini
 *.temp
 *.bak
 *.swp
+
+
+backend/verification_data/
+backend/verification_uploads/

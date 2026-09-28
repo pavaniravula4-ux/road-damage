@@ -59,6 +59,10 @@ function AdminDashboard() {
 
   const [operators, setOperators] = useState([]);
 
+  const [users, setUsers] = useState([]);
+
+  const [usersLoading, setUsersLoading] = useState(false);
+
   const [loading, setLoading] = useState(true);
 
   const [operatorsLoading, setOperatorsLoading] =
@@ -118,8 +122,6 @@ function AdminDashboard() {
     useState(null);
 
   const [activeSection, setActiveSection] = useState("overview");
-  const [users, setUsers] = useState([]);
-  const [usersLoading, setUsersLoading] = useState(false);
   const [showCreateOperator, setShowCreateOperator] = useState(false);
 
 
@@ -256,6 +258,64 @@ function AdminDashboard() {
 
 
   // ============================================================
+  // FETCH USERS
+  // ============================================================
+
+  const fetchUsers = async () => {
+    try {
+      setUsersLoading(true);
+      setError("");
+
+      const response = await fetch(
+        `${API_URL}/api/admin/users`,
+        {
+          method: "GET",
+          headers: getAdminHeaders(),
+        }
+      );
+
+      const responseText = await response.text();
+      let data = {};
+
+      try {
+        data = responseText ? JSON.parse(responseText) : {};
+      } catch {
+        data = {
+          error: `Server returned an invalid response (${response.status}).`,
+        };
+      }
+
+      if (response.status === 401) {
+        handleUnauthorized();
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            data.error ||
+            "Unable to load users."
+        );
+      }
+
+      setUsers(
+        Array.isArray(data)
+          ? data
+          : data.users || []
+      );
+    } catch (err) {
+      console.error("Fetch users error:", err);
+      setError(
+        err.message ||
+          "Unable to load users."
+      );
+    } finally {
+      setUsersLoading(false);
+    }
+  };
+
+
+  // ============================================================
   // INITIAL LOAD
   // ============================================================
 
@@ -269,6 +329,7 @@ function AdminDashboard() {
 
     fetchReports();
     fetchOperators();
+    fetchUsers();
   }, []);
 
 
@@ -728,13 +789,10 @@ function AdminDashboard() {
       setSuccess("");
 
       const response = await fetch(
-        `${API_URL}/api/admin/reports/${reportId}/assign`,
+        `${API_URL}/api/admin/reports/${reportId}/unassign`,
         {
           method: "POST",
           headers: getAdminHeaders(),
-          body: JSON.stringify({
-            operator_id: null,
-          }),
         }
       );
 
@@ -1130,33 +1188,13 @@ function AdminDashboard() {
             .trim()
             .toLowerCase();
 
-        const searchableText = [
-          report.id,
-          report.user_id,
-          report.location,
-          report.damage_type,
-          report.severity,
-          report.priority,
-          report.priority_score,
-          report.status,
-          report.assigned_operator_id,
-          report.created_at,
-        ]
-          .map((value) =>
-            String(
-              value ?? ""
-            ).toLowerCase()
-          )
-          .join(" ");
-
+        // Search is intentionally limited to the damage type.
+        // Searching "crack" therefore shows only Crack reports,
+        // not reports whose Gemini analysis/description contains "crack".
         const matchesSearch =
           searchTerms.length === 0 ||
-          searchTerms.every(
-            (term) => {
-              return searchableText.includes(
-                term
-              );
-            }
+          searchTerms.every((term) =>
+            damageType === term
           );
 
         const matchesStatus =
@@ -1203,24 +1241,6 @@ function AdminDashboard() {
   };
 
 
-  const fetchUsers = async () => {
-    try {
-      setUsersLoading(true);
-      setError("");
-      const response = await fetch(`${API_URL}/api/admin/users`, {
-        headers: getAdminHeaders(),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.message || data.error || "Unable to load users.");
-      setUsers(Array.isArray(data) ? data : data.users || []);
-    } catch (err) {
-      console.error("Fetch users error:", err);
-      setError(err.message || "Unable to load users.");
-    } finally {
-      setUsersLoading(false);
-    }
-  };
-
   const openSection = (section) => {
     setError("");
     setSuccess("");
@@ -1232,6 +1252,7 @@ function AdminDashboard() {
       fetchOperators();
     } else if (section === "users") {
       fetchUsers();
+      fetchReports();
     }
   };
 
@@ -1284,11 +1305,11 @@ function AdminDashboard() {
                 <button type="button" className="admin-view-button" onClick={()=>setShowCreateOperator(v=>!v)}>{showCreateOperator?"Close Form":"+ Create Operator"}</button>
               </div>
               {showCreateOperator && (
-                <form onSubmit={createOperator} style={{padding:"22px",border:"1px solid #e5e7eb",borderRadius:"14px",marginBottom:"25px",background:"#fff"}}>
+                <form onSubmit={createOperator} autoComplete="off" style={{padding:"22px",border:"1px solid #e5e7eb",borderRadius:"14px",marginBottom:"25px",background:"#fff"}}>
                   <h3>Create Operator</h3>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(2,minmax(0,1fr))",gap:"15px",marginTop:"15px"}}>
-                    <input type="text" value={operatorUsername} onChange={e=>setOperatorUsername(e.target.value)} placeholder="Operator username" disabled={creatingOperator} style={{padding:"12px"}}/>
-                    <input type="password" value={operatorPassword} onChange={e=>setOperatorPassword(e.target.value)} placeholder="Operator password" disabled={creatingOperator} style={{padding:"12px"}}/>
+                    <input type="text" name="new_operator_username" autoComplete="new-username" value={operatorUsername} onChange={e=>setOperatorUsername(e.target.value)} placeholder="Enter operator username" disabled={creatingOperator} style={{padding:"12px"}}/>
+                    <input type="password" name="operator_new_password" autoComplete="new-password" value={operatorPassword} onChange={e=>setOperatorPassword(e.target.value)} placeholder="Enter operator password" disabled={creatingOperator} style={{padding:"12px"}}/>
                   </div>
                   <button type="submit" className="admin-view-button" disabled={creatingOperator} style={{marginTop:"16px"}}>{creatingOperator?"Creating...":"Create Operator"}</button>
                 </form>
@@ -1300,9 +1321,78 @@ function AdminDashboard() {
 
           {activeSection === "users" && (
             <section className="admin-reports-container">
-              <h2>👤 User Management</h2>
-              <p style={{marginBottom:"24px"}}>Registered RoadGuard users.</p>
-              {usersLoading ? <div className="admin-empty-state"><p>Loading users...</p></div> : users.length===0 ? <div className="admin-empty-state"><h3>No users found</h3></div> : <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",background:"#fff"}}><thead><tr><th style={{textAlign:"left",padding:"14px",borderBottom:"1px solid #e5e7eb"}}>ID</th><th style={{textAlign:"left",padding:"14px",borderBottom:"1px solid #e5e7eb"}}>Username / Email</th><th style={{textAlign:"left",padding:"14px",borderBottom:"1px solid #e5e7eb"}}>Role</th></tr></thead><tbody>{users.map(user=><tr key={user.id}><td style={{padding:"14px",borderBottom:"1px solid #f0f0f0"}}>{user.id}</td><td style={{padding:"14px",borderBottom:"1px solid #f0f0f0"}}>{user.username||user.email||"N/A"}</td><td style={{padding:"14px",borderBottom:"1px solid #f0f0f0"}}>{user.role||"user"}</td></tr>)}</tbody></table></div>}
+              <div
+                className="admin-report-tools"
+                style={{ marginBottom: "24px" }}
+              >
+                <div>
+                  <h2>👤 User Management</h2>
+                  <p>
+                    View all registered users and the number of road-damage reports uploaded from each account.
+                  </p>
+                </div>
+              </div>
+
+              {usersLoading ? (
+                <div className="admin-empty-state">
+                  <div className="admin-loading-spinner"></div>
+                  <p>Loading users...</p>
+                </div>
+              ) : users.length === 0 ? (
+                <div className="admin-empty-state">
+                  <div className="admin-empty-icon">👥</div>
+                  <h3>No registered users found</h3>
+                  <p>Registered users will appear here.</p>
+                </div>
+              ) : (
+                <div style={{ overflowX: "auto" }}>
+                  <table
+                    style={{
+                      width: "100%",
+                      borderCollapse: "collapse",
+                      background: "#fff",
+                      borderRadius: "14px",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left", padding: "15px 16px", borderBottom: "1px solid #e5e7eb" }}>
+                          ID
+                        </th>
+                        <th style={{ textAlign: "left", padding: "15px 16px", borderBottom: "1px solid #e5e7eb" }}>
+                          Username / Email
+                        </th>
+                        <th style={{ textAlign: "left", padding: "15px 16px", borderBottom: "1px solid #e5e7eb" }}>
+                          Uploaded Reports
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {users.map((user) => {
+                        const uploadedCount = reports.filter(
+                          (report) =>
+                            Number(report.user_id) === Number(user.id)
+                        ).length;
+
+                        return (
+                          <tr key={user.id}>
+                            <td style={{ padding: "15px 16px", borderBottom: "1px solid #f0f0f0" }}>
+                              {user.id}
+                            </td>
+                            <td style={{ padding: "15px 16px", borderBottom: "1px solid #f0f0f0" }}>
+                              {user.username || user.email || `User #${user.id}`}
+                            </td>
+                            <td style={{ padding: "15px 16px", borderBottom: "1px solid #f0f0f0", fontWeight: 800 }}>
+                              {uploadedCount}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </section>
           )}
 

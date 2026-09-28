@@ -12,7 +12,7 @@ function Login({ setRole, setUserId }) {
 
   const API_URL =
     import.meta.env.VITE_API_URL ||
-    "http://127.0.0.1:5000";
+    "http://localhost:5000";
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -30,14 +30,14 @@ function Login({ setRole, setUserId }) {
 
     try {
       const response = await fetch(
-        `${API_URL}/login`,
+        `${API_URL}/api/user/login`,
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            username: username.trim(),
+            email: username.trim(),
             password,
           }),
         }
@@ -47,6 +47,7 @@ function Login({ setRole, setUserId }) {
 
       if (!response.ok) {
         throw new Error(
+          data.error ||
           data.message ||
           data.detail ||
           "Invalid username or password."
@@ -86,7 +87,7 @@ function Login({ setRole, setUserId }) {
       }
 
     } catch (err) {
-      console.error(err);
+      console.error("Login error:", err);
 
       setError(
         err.message ||
@@ -121,7 +122,6 @@ function Login({ setRole, setUserId }) {
 
         </div>
 
-
         <form
           className="login-form"
           onSubmit={handleLogin}
@@ -138,7 +138,6 @@ function Login({ setRole, setUserId }) {
             </p>
 
           </div>
-
 
           <div className="input-group">
 
@@ -168,7 +167,6 @@ function Login({ setRole, setUserId }) {
 
           </div>
 
-
           <div className="input-group">
 
             <label htmlFor="password">
@@ -197,14 +195,12 @@ function Login({ setRole, setUserId }) {
 
           </div>
 
-
           {error && (
             <div className="auth-error">
               <span>!</span>
               {error}
             </div>
           )}
-
 
           <button
             type="submit"
@@ -217,7 +213,6 @@ function Login({ setRole, setUserId }) {
           </button>
 
         </form>
-
 
         <div className="register-section">
 
@@ -235,7 +230,6 @@ function Login({ setRole, setUserId }) {
           </button>
 
         </div>
-
 
         <div className="login-footer">
           AI-powered road safety platform
